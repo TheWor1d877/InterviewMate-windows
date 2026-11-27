@@ -604,7 +604,11 @@ async def test_model_path_is_used_not_model_dir() -> None:
     await engine.ensure_loaded()
 
     request = factory.requests[0]
-    assert request["model_path"] == "/tmp/models/paraformer-zh-streaming"
+    # 路径分隔符随平台变化，统一成 POSIX 分隔符再比较
+    assert (
+        request["model_path"].replace("\\", "/")
+        == "/tmp/models/paraformer-zh-streaming"
+    )
     assert "model_dir" not in request
 
 

@@ -63,7 +63,7 @@ class ScreenshotManager:
     """截图流程的编排者。
 
     :param config: 应用配置。
-    :param backend: 平台截图后端，Linux 侧是 GNOME 扩展与 XDG Portal。
+    :param backend: 平台截图后端，Windows 侧是 mss。
     :param processor: 图片处理器，负责缩放、编码与体积校验。
     :param manager: 问题管理器，图片转成 data URL 后交给它提交。
     :param hint_publisher: 状态栏提示位的异步回调，传空串表示清掉提示；
@@ -96,7 +96,7 @@ class ScreenshotManager:
         """当前用的截图后端名。
 
         对应配置里 ``providers.screenshot`` 的取值：``mock`` 是假后端，
-        真实实现是平台后端名（Linux 侧是 ``gnome``）。
+        真实实现是平台后端名（Windows 侧是 ``mss``）。
         """
         return self._backend.name
 

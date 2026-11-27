@@ -1,7 +1,7 @@
 """FunASR 本地模型加载验证：GPU 加载、流式推理、VAD、真实语音识别。
 
 用法:
-    ./.venv/bin/python scripts/verify_asr_models.py
+    ./.venv/Scripts/python.exe scripts/verify_asr_models.py
 
 模型目录默认 ~/models，可用环境变量 INTERVIEWMATE_MODELS 覆盖。
 

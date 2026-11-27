@@ -463,7 +463,7 @@ _REAL_RECORD = {
         "id": "0acbffb8-...",
         "position": 13,
         "document_id": "8fabceba-db8c-4ff0-a6e6-a2532a1ce950",
-        "content": "XDG Portal 截图目标\n\n截图目标由配置项 screenshot.target 决定。",
+        "content": "截图目标配置\n\n截图目标由配置项 screenshot.target 决定。",
         "word_count": 476,
         "status": "completed",
         "document": {
@@ -490,7 +490,7 @@ async def test_document_name_from_nested_segment_document() -> None:
 
     assert len(results) == 1
     assert results[0].document_name == "接口契约.md"
-    assert results[0].content.startswith("XDG Portal 截图目标")
+    assert results[0].content.startswith("截图目标配置")
     assert results[0].metadata["document_id"] == "8fabceba-db8c-4ff0-a6e6-a2532a1ce950"
 
 

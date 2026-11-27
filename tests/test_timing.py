@@ -471,10 +471,10 @@ def test_timed_with_default_recorder_records_sample() -> None:
     """计时器接到默认记录器上时，退出后样本落进默认记录器。"""
     reset_default_recorder()
 
-    with timed("capture_latency", source="gnome", recorder=default_recorder()) as timer:
+    with timed("capture_latency", source="mss", recorder=default_recorder()) as timer:
         pass
 
     samples = default_recorder().samples("capture_latency")
     assert len(samples) == 1
-    assert samples[0].source == "gnome"
+    assert samples[0].source == "mss"
     assert samples[0].value_ms == timer.elapsed_ms

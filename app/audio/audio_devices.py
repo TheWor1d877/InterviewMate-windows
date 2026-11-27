@@ -10,9 +10,9 @@
 - 麦克风与系统回环在设备表里分得开，来源选择就靠这个区分。
 
 设备表来自平台音频后端，字段见 :class:`~app.platform.types.AudioDevice`：
-``is_loopback`` 为真的是系统回环设备（Linux 的 monitor source、
-Windows 的 WASAPI loopback），其余输入设备是麦克风；``is_default`` 为真的
-是系统当前的默认设备，配置不绑定具体设备名或索引。
+``is_loopback`` 为真的是系统回环设备（WASAPI loopback），其余输入设备是
+麦克风；``is_default`` 为真的是系统当前的默认设备，默认麦克风与默认扬声器
+端点的回环设备都会置真。配置不绑定具体设备名或索引。
 """
 
 from __future__ import annotations

@@ -95,7 +95,7 @@ DEFAULT_FRAGMENT_POOL: tuple[MockFragment, ...] = (
             "配置分 app、ui、hotkeys、audio、asr、screenshot、deepseek、rag、coding、"
             "privacy、providers 几段。providers 下四个键各取 mock 或真实实现名："
             "llm 取 mock 或 deepseek，retrieval 取 mock 或 dify，asr 取 mock 或 funasr，"
-            "screenshot 取 mock、gnome 或 mss。开发期四个键全设 mock。"
+            "screenshot 取 mock 或 mss。开发期四个键全设 mock。"
         ),
         document_name="《2-骨架与配置》配置结构",
         keywords=("配置", "providers", "mock", "dify", "rag", "config", "top_k"),
@@ -103,8 +103,9 @@ DEFAULT_FRAGMENT_POOL: tuple[MockFragment, ...] = (
     ),
     MockFragment(
         content=(
-            "进程通信走 Unix 域 socket，一行一个 JSON。请求体是 action 与 request_id，"
-            "响应体是 ok、error 与 payload；action 与 request_id 必须是字符串，"
+            "进程通信走本机 TCP loopback（回环地址上的随机端口），一行一个 JSON。"
+            "请求体是 action 与 request_id，响应体是 ok、error 与 payload；"
+            "action 与 request_id 必须是字符串，"
             "ok 必须是布尔值，payload 必须是对象，类型不对就抛 SocketError，"
             "对应错误码 E_SOCKET。"
         ),
@@ -134,20 +135,19 @@ DEFAULT_FRAGMENT_POOL: tuple[MockFragment, ...] = (
     ),
     MockFragment(
         content=(
-            "GNOME Shell 截图扩展跑在 Shell 进程里，注册 D-Bus 名字 "
-            "com.interviewmate.Screenshot，对象路径 /com/interviewmate/Screenshot，"
-            "接口方法 Capture 收 target 与 monitor，返回 PNG 字节；"
-            "主进程用它静默抓整屏，屏幕上不弹任何确认框。"
+            "截图走 Windows 侧的 mss 后端：直接在内存里抓屏，整屏取虚拟桌面、"
+            "主屏按系统主屏尺寸匹配、指定屏按序号取，抓到的位图转成 PNG 字节交给"
+            "主进程，全程不落盘，屏幕上不弹任何确认框。"
         ),
-        document_name="extensions/interviewmate-screenshot/extension.js",
-        keywords=("截图扩展", "gnome", "shell", "扩展", "portal", "dbus"),
+        document_name="app/platform/windows/screenshot.py",
+        keywords=("截图扩展", "截图", "mss", "抓屏", "windows"),
         score=0.42,
     ),
     MockFragment(
         content=(
-            "providers.screenshot 取 mock 时用内置假后端：不连 D-Bus、不弹 Portal 窗口，"
+            "providers.screenshot 取 mock 时用内置假后端：不抓真实屏幕，"
             "每次采集都返回同一张固定的小 PNG（320x180）。假后端不做任何平台判断，"
-            "这条链路的验证不需要真去连 D-Bus 或抓真屏幕。"
+            "这条链路的验证不需要真去抓屏。"
         ),
         document_name="《4-截图输入与多模态》假截图后端",
         keywords=("假后端", "假截图", "截图", "screenshot", "png", "mock"),

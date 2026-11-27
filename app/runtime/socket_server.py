@@ -2,9 +2,9 @@
 
 见《2-骨架与配置》进程通信一节：客户端连上后发一行请求、读一行响应、断开连接。
 
-传输层由平台门面提供（:func:`app.platform.get_platform`）：Linux 侧是 AF_UNIX
-socket 文件，Windows 侧是 TCP loopback。本模块只管协议与分发，不关心端点是
-socket 文件还是端口文件。
+传输层由平台门面提供（:func:`app.platform.get_platform`）：Windows 侧是 TCP
+loopback，端口号写进端点文件，token 写进同目录的 ``.token`` 文件做握手。
+本模块只管协议与分发，不关心端点细节。
 
 每个连接的流程：读一行 → 按《2-骨架与配置》进程通信一节解析请求 →
 找对应 action 的 handler → 调用 → 把 handler 返回的 dict 当作 payload 回一行响应 →
@@ -85,10 +85,9 @@ def _sanitize_request_id(request_id: str | None) -> str | None:
 class SocketServer:
     """进程通信监听服务。
 
-    传输层由平台门面给出：Linux 侧是 AF_UNIX socket 文件，Windows 侧是
-    TCP loopback。协议与分发在两个平台上一致。
+    传输层由平台门面给出：Windows 侧是 TCP loopback。协议与分发和传输层解耦。
 
-    :param socket_path: 通信端点路径，默认仓库根 ``runtime/interviewmate.sock``。
+    :param socket_path: 通信端点路径，默认仓库根 ``runtime/interviewmate.port``。
     :param handlers: action 到 handler 的映射，key 是《2-骨架与配置》进程通信一节的
         action 取值，value 接收 :class:`~app.runtime.socket_protocol.Request`，
         返回 dict 当作响应 payload。

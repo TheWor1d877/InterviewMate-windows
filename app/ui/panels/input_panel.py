@@ -6,7 +6,7 @@
 - Shift+回车与 Ctrl+回车插入换行，不提交。多数终端发不出 Shift+回车，
   这时回车就是提交，这是终端限制；
 - 粘贴多行题面保留全部行，由 TextArea 自己处理，不截断；
-- Ctrl+V 读系统剪贴板后插入，鼠标中键读 PRIMARY 选区后插入，
+- Ctrl+V 读系统剪贴板后插入，鼠标中键也按普通剪贴板读取后插入，
   两条路都走 :func:`app.utils.clipboard.read_clipboard`；
   读不到时经状态栏提示位提示终端原生粘贴键（Ctrl+Shift+V 或右键粘贴）；
   终端原生粘贴发的是 :class:`~textual.events.Paste` 事件，照常进输入框。
@@ -42,7 +42,7 @@ PASTE_HINT = "剪贴板读不到，请用 Ctrl+Shift+V 或右键粘贴"
 class QuestionInputPanel(TextArea):
     """底部输入框。回车提交，Shift+回车与 Ctrl+回车换行。"""
 
-    # Ctrl+V 覆盖 TextArea 自带的粘贴：OSC52 在 GNOME Terminal 上不可用，
+    # Ctrl+V 覆盖 TextArea 自带的粘贴：Windows Terminal 里 OSC52 不总是可用，
     # 改成直接读系统剪贴板后插入
     BINDINGS = [Binding("ctrl+v", "paste_clipboard", "粘贴", show=False)]
 
@@ -78,7 +78,8 @@ class QuestionInputPanel(TextArea):
 
         读剪贴板是子进程调用，放进线程里跑，不阻塞按键处理。
 
-        :param primary: True 读 PRIMARY 选区，鼠标中键走这条。
+        :param primary: 保留既有调用契约。Windows 没有 PRIMARY 选区，
+            这个参数为 True 时也按普通剪贴板读取。
         """
         text = await asyncio.to_thread(read_clipboard, primary=primary)
         if text:
@@ -114,10 +115,11 @@ class QuestionInputPanel(TextArea):
     # 鼠标与按键
     # ------------------------------------------------------------------
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
-        """鼠标中键粘贴 PRIMARY 选区，其余按键交给 TextArea。
+        """鼠标中键粘贴普通剪贴板，其余按键交给 TextArea。
 
         终端开启鼠标上报后，中键在应用内没有原生行为，
-        这里补上与桌面一致的「中键粘贴选中内容」。
+        这里补上与桌面一致的「中键粘贴」；Windows 没有 PRIMARY 选区，
+        统一读普通剪贴板。
 
         :param event: 鼠标按下事件。
         """

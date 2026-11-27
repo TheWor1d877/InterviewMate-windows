@@ -7,11 +7,11 @@
 三块内容：
 
 - 退出码表：见《2-骨架与配置》命令行入口一节，:mod:`app.cli` 复用这里的常量；
-- 本机能力检查：音频设备（:func:`list_input_devices`）与 XDG Portal 截图接口
+- 本机能力检查：音频设备（:func:`list_input_devices`）与平台截图接口
   （:func:`probe_screenshot_interface`），``start`` 的第 3、4 步与 ``test`` 自检都用；
-- 进程装配：:func:`run_main` 写 PID 文件、建 socket 服务端、启动界面、退出时收尾。
+- 进程装配：:func:`run_main` 写 PID 文件、建通信服务端、启动界面、退出时收尾。
 
-M1 阶段没有真实 provider 实现（DeepSeek 客户端、Dify、FunASR、XDG 截图分别在
+M1 阶段没有真实 provider 实现（DeepSeek 客户端、Dify、FunASR、截图分别在
 M2/M4/M8 落地），因此这里不造假的 provider 类：状态字段按《2-骨架与配置》状态字段
 取值表的缺省值给，截图只做接口能力检查，不落盘存图。
 
@@ -291,8 +291,8 @@ def required_packages(config: AppConfig) -> tuple[str, ...]:
     """本次运行要用的依赖包。
 
     基础包见《2-骨架与配置》依赖一节；音频与截图按配置开关带上，
-    这两个能力的第三方包由当前平台的实现给出（Linux 侧是 ``sounddevice`` 与
-    ``dbus_next``，Windows 侧换成自己的那一套）；
+    这两个能力的第三方包由当前平台的实现给出（Windows 侧是 ``psutil`` 与
+    ``mss`` 这一套）；
     ``providers.asr`` 指向真实实现时才要求 FunASR 这一套，
     ``providers.screenshot`` 指向真实实现时才要求 pillow。
 
@@ -335,8 +335,8 @@ def check_dependencies(packages: Iterable[str]) -> list[str]:
 def list_input_devices() -> list[AudioDevice]:
     """枚举本机音频输入设备。
 
-    委托给当前平台的音频后端：Linux 侧是 ``sounddevice``，Windows 侧是
-    WASAPI 枚举，字段见 :class:`~app.platform.types.AudioDevice`。
+    委托给当前平台的音频后端：Windows 侧是 WASAPI 枚举，
+    字段见 :class:`~app.platform.types.AudioDevice`。
 
     :raises AudioDeviceError: 音频依赖不可导入，或枚举失败。
     """
@@ -355,7 +355,7 @@ def probe_audio_devices() -> ProbeResult:
     except AudioDeviceError as exc:
         return ProbeResult(ok=False, detail=exc.message, code=exc.code)
     except NotImplementedError as exc:
-        # 平台的音频后端还没实现（Windows 侧本轮是占位）
+        # 平台的音频后端还没有实现
         return ProbeResult(ok=False, detail=str(exc), code="E_AUDIO_DEVICE")
     if not devices:
         return ProbeResult(ok=False, detail="本机没有音频输入设备", code="E_AUDIO_DEVICE")
@@ -365,9 +365,8 @@ def probe_audio_devices() -> ProbeResult:
 async def probe_screenshot_interface(timeout: float = 3.0) -> ProbeResult:
     """检查截图接口能不能用。
 
-    委托给当前平台的截图后端：Linux 侧查 D-Bus 会话总线与 XDG Portal 服务名
-    在不在，不调用 ``Screenshot`` 方法，所以不会在用户屏幕上弹对话框；
-    Windows 侧查 mss 能不能用。开发期 ``providers.screenshot=mock`` 时
+    委托给当前平台的截图后端（Windows 侧由 ``mss`` 实现）：只查接口在不在，
+    不真截图，所以不会在用户屏幕上留下痕迹。开发期 ``providers.screenshot=mock`` 时
     也只做这一步能力检查，不落盘存图。
 
     失败时的错误码是 ``E_SCREENSHOT``。
@@ -377,7 +376,7 @@ async def probe_screenshot_interface(timeout: float = 3.0) -> ProbeResult:
     except ScreenshotError as exc:
         return ProbeResult(ok=False, detail=exc.message, code=exc.code)
     except NotImplementedError as exc:
-        # 平台的截图后端还没实现（Windows 侧本轮是占位）
+        # 平台的截图后端还没有实现
         return ProbeResult(ok=False, detail=str(exc), code="E_SCREENSHOT")
     return ProbeResult(ok=True, detail=detail)
 
@@ -1360,8 +1359,8 @@ def assemble_screenshot_manager(
 ) -> ScreenshotManager:
     """把截图管理器装配到界面上。
 
-    后端按 ``providers.screenshot`` 选：``mock`` 用假后端，返回固定 PNG，
-    不连 D-Bus；其它取值用当前平台的截图后端。
+    后端按 ``providers.screenshot`` 选：``mock`` 用假后端，返回固定 PNG；
+    其它取值用当前平台的截图后端（Windows 侧是 ``mss``）。
 
     截图提交走输入路由器：三种输入汇到一条路上，
     见《8-集成与验收》三种输入的汇合一节。没给路由器时这里现造一个。
@@ -1488,8 +1487,8 @@ def assemble_global_hotkeys(
 ) -> HotkeyListener | None:
     """把全局热键监听装到主进程上。
 
-    全局监听直接读系统输入，终端失焦时也能收到按键，F8 做成按住说话：
-    按下开始采集、松开停止并自动提交；F9 按下截屏。界面被标记之后
+    全局热键由 AutoHotkey v2 触发，终端失焦时也能收到按键。F8 按一次
+    开始采集，再按一次停止并提交；F9 按一次截屏。界面被标记之后
     自己的 F8 与 F9 动作会短路，同一次按键不会处理两遍，
     见《5-语音输入与流式ASR》F8 交互一节。
 
@@ -2218,8 +2217,8 @@ def stop_stale_instance() -> bool:
     """回收上一次留下的主进程，返回能否继续启动。
 
     顺序：通信端点上还有活进程就先发 ``stop`` 并等它整个退出；没退出的，
-    按 PID 文件与 ``/proc`` 扫出的本应用进程发 ``SIGTERM``，超时再
-    ``SIGKILL``；最后清掉残留的 PID 与端点文件。
+    按 PID 文件与 ``psutil`` 扫出的本应用进程发 ``terminate()``，超时再
+    ``kill()``；最后清掉残留的 PID 与端点文件。
 
     PID 文件里的 PID 可能被系统复用，不是本应用的进程一概不结束，
     只把 PID 文件当残留文件处理。回收后端点仍被占用或者还有本应用进程
@@ -2452,21 +2451,24 @@ async def run_main(config: AppConfig) -> int:
         log_event("main.error", "界面运行失败", level="ERROR", error=str(exc))
         return EXIT_ERROR
     finally:
+        # 收尾顺序见《2-骨架与配置》进程通信一节与 WIN-MILESTONES W2.5：
+        # 停采集 → 取消模型任务 → 结束 ASR 流 → 关 HTTP → 删端口/token 文件 → 删 PID 文件。
         # 先关全局热键：收尾过程中不再收到按键，重复 stop 安全
         if hotkey_listener is not None:
             hotkey_listener.stop()
-        # 采集要先停，HTTP 客户端才能关，见《2-骨架与配置》进程通信一节对 stop 的描述
+        # 停采集并冲刷 ASR 流：AudioManager.stop() 会先停采集再结束识别流，
+        # HTTP 客户端才能随后关掉
         await state.stop_voice()
-        await close_client(client)
-        await close_retrieval(retrieval)
-        # ASR 还在加载时收尾：取消预加载任务，不留悬挂的任务
+        # ASR 还在加载时收尾：取消模型加载任务，不留悬挂的任务
         if not asr_preload_task.done():
             asr_preload_task.cancel()
             await asyncio.gather(asr_preload_task, return_exceptions=True)
-        # 先删 PID 文件再删 socket：命令行侧的 stop 轮询 socket 是否还在，
-        # 反过来写会让 stop 先认为主进程已退出，而 PID 文件还留在盘上
-        remove_pid(PID_PATH)
+        await close_client(client)
+        await close_retrieval(retrieval)
+        # 先删端口/token 文件（传输层收掉监听），再删 PID 文件：
+        # 命令行侧的 stop 轮询端口是否还在，最后一步落定 PID 文件已清理
         await server.stop()
+        remove_pid(PID_PATH)
         # 收尾时把这一轮跑下来的指标统计打成一条日志
         _log_metric_stats()
         log_event("main.stop", "主进程收尾完成")
@@ -2514,7 +2516,7 @@ async def start_process(
         redact=config.privacy.redact_secrets_in_logs,
     )
 
-    # 配置指定的截图后端必须与当前平台的后端一致，见《9-平台差异与Windows适配》
+    # 配置指定的截图后端必须与当前平台的后端一致，见《2-骨架与配置》配置结构一节
     platform = get_platform()
     configured_screenshot = config.providers.screenshot
     if (
@@ -2590,7 +2592,7 @@ async def start_process(
     # 前面的检查都过了才回收旧实例：配置写错或没有终端时不动正在跑的进程
     if not stop_stale_instance():
         print(
-            "上次的主进程没有停下来，start 放弃；可先执行 ./interviewmate stop",
+            "上次的主进程没有停下来，start 放弃；可先执行 interviewmate.cmd stop",
             flush=True,
         )
         log_event("main.reclaim", "旧实例没停下来，放弃启动", level="ERROR")

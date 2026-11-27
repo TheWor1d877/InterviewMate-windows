@@ -1,10 +1,10 @@
 # 语音输入与流式 ASR
 
-按住 F8 采集面试官的语音，FunASR 边说边出字，松开 F8 停止并把最终文本自动提交。
+按一次 F8 开始采集面试官的语音，FunASR 边说边出字，再按一次 F8 停止并把最终文本自动提交。
 
 依赖：《3-文本输入与流式回答》。
 
-本文件描述 Linux 侧实现，Windows 侧的对应实现与差异见《9-平台差异与Windows适配》。
+本文件描述 Windows 侧实现。麦克风走 `sounddevice`，系统回环走 `soundcard` 的 WASAPI loopback。
 
 ## 交付物
 
@@ -14,7 +14,7 @@ app/
 │   ├── audio_manager.py         采集启停与状态
 │   ├── audio_capture.py         sounddevice 回调
 │   ├── audio_devices.py         设备枚举与来源选择
-│   ├── audio_source.py          麦克风与系统回环的分离采集，Linux 侧用 PulseAudio 与 PipeWire 的 monitor source
+│   ├── audio_source.py          麦克风与系统回环的分离采集，系统回环走 WASAPI loopback
 │   └── funasr_engine.py         FunASR 模型加载与流式推理
 └── inputs/
     └── hotkey_controller.py     F8 触发
@@ -27,13 +27,13 @@ app/
 ```text
 AUDIO OFF
     |
-  F8 按下
+  按一次 F8
     |
 AUDIO ON
     |
 持续采集和 ASR
     |
-F8 松开
+再按一次 F8
     |
 停止采集
     |
@@ -43,21 +43,21 @@ ASR FINAL
 ```
 
 1. 程序启动后不持续监听麦克风。
-2. 按下 F8 启动语音采集，状态栏显示 AUDIO 为 on，ASR 为 ready。按住期间一直采集。
+2. 按一次 F8 启动语音采集，状态栏显示 AUDIO 为 on，ASR 为 ready。采集期间一直识别。
 3. FunASR 处理音频流。
 4. 识别过程中的部分结果只作临时显示，不提交。
-5. 松开 F8 停止采集。
+5. 再按一次 F8 停止采集。
 6. ASR 完成最后一次解码并合并文本。
 7. 最终文字自动提交给问题处理模块，不需要再按回车。
 
-长按时系统产生的按键重复事件忽略，只认第一次按下与最后的松开。全局监听生效时，终端内按 F8 也走同一条路，界面自身的 F8 绑定短路，同一次按键不会处理两遍。
+Windows Terminal 前台时由应用内 F8 绑定处理，AutoHotkey 脚本在终端前台时不接管，同一次按键不会处理两遍；400 毫秒内的重复触发只真正切换一次。
 
-前置条件：Linux 下由进程内全局热键监听接收 F8，终端失焦也能用。监听要求当前用户在 input 组，加入命令是 `sudo usermod -aG input $USER`，之后重新登录。改完组要重新登录、开新终端才生效。不满足条件时回退到终端内按键：F8 仍是按一下开始、再按一下停止的切换语义，且只在终端有焦点时有效。
+前置条件：Windows 下由 AutoHotkey v2 全局绑定 F8，终端失焦也能用；脚本静默调用 CLI，经 IPC 通知主进程，见《3-文本输入与流式回答》。终端有焦点时由应用内按键处理，两条路都是按一下开始、再按一下停止的切换语义。
 
 F8 有三条触发路径，最后都落到同一个控制器：
 
-- 全局热键监听：按下触发开始，松开触发停止，仅识别 F1 到 F12。
-- 界面快捷键：键名取 `hotkeys.voice_toggle`，默认 F8。界面层把按键绑到 `InterviewMateApp.action_voice_toggle` 上，装配层用 `attach_voice_toggle` 把采集启停的回调挂进来。全局监听不可用时按切换语义处理。
+- AutoHotkey 全局绑定：终端失焦时也能触发 F8，脚本调用 `interviewmate.cmd hotkey voice-toggle`，经 IPC 送给主进程，语义是切换。
+- 界面快捷键：键名取 `hotkeys.voice_toggle`，默认 F8。终端有焦点时由 Textual 接收，界面层把按键绑到 `InterviewMateApp.action_voice_toggle` 上，装配层用 `attach_voice_toggle` 把采集启停的回调挂进来，语义是切换。
 - socket 动作：`action` 取 `voice-toggle`，主进程转给 `HotkeyController.handle_voice_toggle`，语义是切换。
 
 三条路径调的是同一个 `HotkeyController`，正在采集就停止并提交最终文本，没在采集就开始采集。socket 这条路返回的字段见《2-骨架与配置》进程通信一节。
@@ -88,7 +88,7 @@ async def toggle_voice():
 
 ## 音频来源
 
-要支持 Ubuntu 下的多种输入：
+要支持 Windows 下的多种输入：
 
 - 麦克风。
 - 系统输出回环音频。
@@ -96,11 +96,11 @@ async def toggle_voice():
 
 优先支持系统回环，用来识别会议软件播放的远端声音。
 
-设备枚举走 PipeWire 与 PulseAudio 的接口，`./interviewmate devices` 列出可用输入源和它们的编号。Windows 侧的系统回环走 WASAPI loopback，采集参数也不同，见《9-平台差异与Windows适配》。
+设备枚举：麦克风用 `sounddevice` 枚举输入设备，系统回环用 `soundcard` 的 `all_microphones(include_loopback=True)` 枚举扬声器端点的回环。`interviewmate.cmd devices` 列出可用输入源和它们的编号。回环设备的编号从 10000 起，与 PortAudio 的麦克风编号分开。
 
 来源取值是 `microphone`、`system_monitor`、`mixed`、`auto`。`microphone`、`system_monitor`、`mixed` 按来源挑设备，同类有多台时优先系统默认设备，没有默认标记时取列表第一个。`auto` 在默认麦克风与默认回环都可用时混成一路，来源标签是 `mixed`；只有回环时用回环，只有麦克风时用麦克风；两个都不通时报错码 `E_AUDIO_DEVICE`。
 
-默认设备在设备枚举时动态解析：先问 PipeWire 的默认 sink 与 source 节点名，按名字在设备表里匹配出默认输入与默认回环；问不到时退回 sounddevice 给出的默认设备索引与默认输出名。两级都失败时所有设备按非默认处理，不影响枚举，选设备时退回列表第一个。配置里不写具体设备名或索引，换设备后重新枚举即生效。
+默认设备在设备枚举时动态解析：麦克风按 `sounddevice` 的默认输入索引标记；回环按 `soundcard` 的默认扬声器端点 ID 标记，ID 相同的回环设备就是默认回环。解析失败时所有设备按非默认处理，不影响枚举，选设备时退回列表第一个。配置里不写具体设备名或索引，换设备后重新枚举即生效。
 
 麦克风与系统音频分开采集时，各自保留来源标签，避免把用户自己说的话当成面试官的问题。混成一路的音频允许用 VAD 切分，也可以接说话人区分，但说话人识别不作为正常工作的前提。
 
@@ -108,9 +108,9 @@ async def toggle_voice():
 
 采样率 16000 Hz，单声道，块长 200 毫秒。
 
-Linux 侧按这个参数直接开流。Windows 侧设备原生采样率多为 48000 Hz，loopback 一路是立体声，要按原生格式采集后重采样，见《9-平台差异与Windows适配》。
+Windows 设备原生采样率多为 48000 Hz，WASAPI loopback 端点通常是立体声，按原生格式采集后再下混并重采样到 16000 Hz。回环一路走 WASAPI 共享模式，`soundcard` 在库内部把端点混音格式转换到请求采样率，端点原生采样率拿不到时按 48000 Hz 开流。
 
-开流声道数上限为 2，超过按 2 开流后下混单声道。PipeWire 的默认设备会报出上百个输入声道，PortAudio 按这个数开流会崩溃，所以设备原生声道数再大都只按 2 声道开流。
+开流声道数上限为 2，超过按 2 开流后下混单声道。部分虚拟声卡驱动会报出大量输入声道，PortAudio 按这个数开流会崩溃，所以设备原生声道数再大都只按 2 声道开流。
 
 200 毫秒是采集回调每次读取的量，不是送进模型的块长。送到模型之前要先按 9600 点拼成 600 毫秒一块，块长关系见《接口契约》的「FunASR 音频块参数」。
 
@@ -142,7 +142,7 @@ vad_model = AutoModel(
 
 本地模型目录放在 `~/models/<模型名>`，用 `model_path` 传，不能用 `model_dir`：funasr 只在 kwargs 里存在 `model_path` 时才跳过 hub 下载，`model_dir` 不参与该判断，权重会被重新拉进 modelscope 缓存。
 
-Linux 上装 `torch` 要指定 CUDA 索引源，PyPI 默认的 Linux wheel 是 CPU 版。Windows 侧的装法见《9-平台差异与Windows适配》。
+Windows 上装 `torch` 要指定 CUDA 索引源：`pip install torch --index-url https://download.pytorch.org/whl/cu124`。PyPI 默认 wheel 是 CPU 版。
 
 两个实例都只初始化一次，整个进程生命周期内复用同一个实例。VAD 实例只在配置项 `vad_enabled` 为真时创建。
 
@@ -221,17 +221,15 @@ VAD 输出的语音区间用来判断一句话是否结束。区间边界由模�
 ## 实测结论
 
 - FunASR 的流式解码比离线整段识别少一个尾字。这是 funasr 流式解码本身的差异，不是本实现的偏差。
-- 模型在 CUDA 上首次加载约 6 秒。加载在工作线程里做，不占住事件循环；模型就绪前按下 F8，会等到加载完才开始采集。
+- 模型在 CUDA 上首次加载约 6 秒。加载在工作线程里做，不占住事件循环；模型就绪前按 F8，会等到加载完才开始采集。
 
 ## 验收
 
-- 按住 F8 开始采集，状态栏 AUDIO 变成 on，松开停止。
+- 按一次 F8 开始采集，状态栏 AUDIO 变成 on，再按一次停止。
 - 停止后最终文本自动提交，不需要按回车。
 - 部分结果不触发模型请求，最终结果只触发一次。
 - 说话时状态栏持续更新临时文字，停止后临时文字变成正式题目。
 - 停止采集时没有识别到内容，状态栏提示识别失败，不发起模型请求。
 - 连续两段录音之间没有互相干扰，第二段的识别结果里没有第一段的残留文字。
-- 设备不可用时 `./interviewmate devices` 列出可用设备，报错码 `E_AUDIO_DEVICE`。
+- 设备不可用时 `interviewmate.cmd devices` 列出可用设备，报错码 `E_AUDIO_DEVICE`。
 - ASR 模型加载失败时程序照常启动，状态栏 ASR 显示 error。
-
-Windows 侧音频验收见《9-平台差异与Windows适配》。

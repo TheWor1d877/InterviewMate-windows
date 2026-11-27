@@ -1,4 +1,4 @@
-"""全局热键层与 Linux 读 ``/dev/input`` 后端的测试。
+"""全局热键层与 Windows/AHK 触发链路的测试。
 
 覆盖：
 
@@ -6,45 +6,33 @@
   一次 ``on_press``，松开触发一次 ``on_release``，没按过直接松开不触发，
   ``stop()`` 之后到达的按键一律丢弃；
 - 提供者不可用、启动抛异常时 ``start()`` 返回 False 且不向外抛；
-- 触发逻辑与 24 字节 ``input_event`` 的解析：按下、松开、长按重复，
-  非 F 键与 EV_SYN 被过滤；
-- 键盘能力判断：键集含 KEY_A 算键盘，只含 KEY_POWER 不算；
-- ioctl 的结果按 CPython 语义从传入的 bytearray 里取：设备名与能力位都
-  不能拿返回值当字节用，假 fcntl 会故意返回整数；
-- :class:`~app.platform.linux.hotkeys.EvdevHotkeyProvider` 的设备目录为空、
-  设备是普通文件、设备没权限时 ``available()`` 为 False 且 ``start()`` 不抛；
-- Linux 平台对象挂 ``EvdevHotkeyProvider``，Windows 平台对象挂
-  :class:`~app.inputs.global_hotkeys.NullHotkeyProvider`。
-
-不打开真实的 ``/dev/input``：设备目录用 pytest 的 ``tmp_path`` 注入。
+- Windows 平台门面用 :class:`~app.inputs.global_hotkeys.NullHotkeyProvider`；
+- AutoHotkey v2 脚本：存在、带 v2 声明与 ``#HotIf`` 终端保护、
+  F8/F9 分别触发 ``hotkey voice-toggle`` 与 ``hotkey screenshot``，
+  且脚本里不写死本机绝对路径；
+- AHK 调用的 CLI 链路：``hotkey voice-toggle|screenshot`` 按动作发到 socket，
+  socket 侧用假实现，不连真实主进程。
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-import struct
-import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import app.cli
+from app.cli import main as cli_main
 from app.inputs.global_hotkeys import (
-    GlobalHotkeyProvider,
     HotkeyHandlers,
     HotkeyListener,
     NullHotkeyProvider,
 )
-from app.platform.linux import LinuxPlatform
-from app.platform.linux import hotkeys as linux_hotkeys
-from app.platform.linux.hotkeys import (
-    KEY_NAME_TO_CODE,
-    EvdevHotkeyProvider,
-    _parse_key_event,
-    is_keyboard_capability,
-)
+from app.main import EXIT_OK
 from app.platform.windows import WindowsPlatform
+from app.runtime.socket_protocol import Response
 
 # ----------------------------------------------------------------------
 # 假对象与工具
@@ -82,54 +70,6 @@ class _FakeProvider:
     def stop(self) -> None:
         self.stop_calls += 1
         self.emit = None
-
-
-def _event(event_type: int, code: int, value: int) -> bytes:
-    """按 64 位 Linux 的 input_event 结构体拼一条记录。"""
-    return struct.pack("llHHi", 0, 0, event_type, code, value)
-
-
-def _bits(*set_bits: int, size: int = 96) -> bytes:
-    """造一个位集，``set_bits`` 里的位为 1。"""
-    buffer = bytearray(size)
-    for bit in set_bits:
-        buffer[bit // 8] |= 1 << (bit % 8)
-    return bytes(buffer)
-
-
-class _FakeIoctl:
-    """按 CPython 语义工作的假 ``fcntl``：写缓冲区，返回整数。
-
-    ``fcntl.ioctl`` 的第三个参数是可变缓冲区时，内核把结果原地写进去，
-    返回值是系统调用的整数返回（``EVIOCGNAME`` 是名字长度）。
-    这里刻意返回整数，把返回值当字节用的实现会解析出零字节而不是设备名。
-    """
-
-    def __init__(self, *, name: str, event_bits: bytes, key_bits: bytes) -> None:
-        self.name = name
-        self.event_bits = event_bits
-        self.key_bits = key_bits
-
-    def ioctl(self, fd: int, request: int, buf: bytearray) -> int:
-        """把模拟的设备信息写进 ``buf``，返回一个整数。"""
-        if request == linux_hotkeys.EVIOCGNAME:
-            payload = self.name.encode("utf-8")
-            buf[: len(payload)] = payload
-            if len(payload) < len(buf):
-                buf[len(payload)] = 0  # 内核用 NUL 结尾
-            return len(payload)
-        if request == linux_hotkeys._eviocgbit(
-            linux_hotkeys.EV_SYN, linux_hotkeys.EVENT_BITS_SIZE
-        ):
-            data = self.event_bits
-        elif request == linux_hotkeys._eviocgbit(
-            linux_hotkeys.EV_KEY, linux_hotkeys.KEY_BITS_SIZE
-        ):
-            data = self.key_bits
-        else:
-            raise OSError(f"不认识的 ioctl 请求：0x{request:x}")
-        buf[: len(data)] = data[: len(buf)]
-        return len(data)
 
 
 async def _wait_until(predicate: Callable[[], bool], timeout: float = 1.0) -> None:
@@ -326,7 +266,7 @@ async def test_start_returns_false_when_provider_unavailable() -> None:
 
 async def test_start_returns_false_when_availability_check_raises() -> None:
     """探测可用性时抛异常，按不可用处理，start() 返回 False 且不抛。"""
-    provider = _FakeProvider(available_error=OSError("读不了设备"))
+    provider = _FakeProvider(available_error=OSError("探测失败"))
     listener = HotkeyListener(
         provider,
         {"f8": HotkeyHandlers(on_press=lambda: None)},
@@ -339,7 +279,7 @@ async def test_start_returns_false_when_availability_check_raises() -> None:
 
 async def test_start_returns_false_when_provider_start_raises() -> None:
     """提供者启动时抛异常，start() 返回 False 且不抛。"""
-    provider = _FakeProvider(start_error=RuntimeError("设备没了"))
+    provider = _FakeProvider(start_error=RuntimeError("启动失败"))
     listener = HotkeyListener(
         provider,
         {"f8": HotkeyHandlers(on_press=lambda: None)},
@@ -359,176 +299,84 @@ def test_null_provider_is_always_unavailable() -> None:
 
 
 # ----------------------------------------------------------------------
-# input_event 解析
+# Windows 平台接线与 AHK 脚本
 # ----------------------------------------------------------------------
-
-
-def test_supported_key_table_covers_f1_to_f12() -> None:
-    """支持表只有 f1..f12，键码与内核定义一致。"""
-    assert KEY_NAME_TO_CODE == {
-        "f1": 59,
-        "f2": 60,
-        "f3": 61,
-        "f4": 62,
-        "f5": 63,
-        "f6": 64,
-        "f7": 65,
-        "f8": 66,
-        "f9": 67,
-        "f10": 68,
-        "f11": 87,
-        "f12": 88,
-    }
-
-
-@pytest.mark.parametrize("name, code", sorted(KEY_NAME_TO_CODE.items()))
-def test_parse_key_event_maps_press_and_release(name: str, code: int) -> None:
-    """每条支持键的按下与松开都解析成 ``(键名, 布尔)``。"""
-    assert _parse_key_event(_event(1, code, 1)) == (name, True)
-    assert _parse_key_event(_event(1, code, 0)) == (name, False)
-
-
-def test_parse_key_event_filters_repeat_syn_and_other_keys() -> None:
-    """长按重复、EV_SYN、非 F 键与长度不对的记录都被过滤。"""
-    assert _parse_key_event(_event(1, 66, 2)) is None  # 长按重复
-    assert _parse_key_event(_event(0, 0, 0)) is None  # EV_SYN
-    assert _parse_key_event(_event(1, 30, 1)) is None  # KEY_A 不在支持表
-    assert _parse_key_event(_event(1, 66, 7)) is None  # 未知取值
-    assert _parse_key_event(b"\x00" * 4) is None  # 长度不对
-
-
-# ----------------------------------------------------------------------
-# 键盘能力判断
-# ----------------------------------------------------------------------
-
-
-def test_keyboard_capability_requires_ev_key_and_key_a() -> None:
-    """事件类型含 EV_KEY 且键集含 KEY_A 才算键盘。"""
-    event_bits = _bits(1)  # EV_KEY
-    assert is_keyboard_capability(event_bits, _bits(30, 116)) is True
-    # 只有 KEY_POWER(116) 没有字母键，不算键盘
-    assert is_keyboard_capability(event_bits, _bits(116)) is False
-    # 没有 EV_KEY 事件类型，不算键盘
-    assert is_keyboard_capability(_bits(0), _bits(30)) is False
-
-
-# ----------------------------------------------------------------------
-# EvdevHotkeyProvider：只碰 tmp_path，不打开真实 /dev/input
-# ----------------------------------------------------------------------
-
-
-def test_evdev_provider_empty_root_is_unavailable(tmp_path: Path) -> None:
-    """设备目录为空时 available() 为 False，start() 不抛，重复 stop 安全。"""
-    provider = EvdevHotkeyProvider(root=str(tmp_path))
-    assert provider.available() is False
-
-    provider.start(lambda key, pressed: None)  # 不抛
-    provider.stop()
-    provider.stop()  # 重复 stop 安全
-    assert provider.available() is False
-
-
-def test_evdev_provider_regular_file_is_skipped(tmp_path: Path) -> None:
-    """event* 是普通文件、读不到能力位时跳过该设备，不抛。"""
-    (tmp_path / "event0").write_bytes(b"\x00" * 24)
-    provider = EvdevHotkeyProvider(root=str(tmp_path))
-
-    assert provider.available() is False
-    provider.start(lambda key, pressed: None)
-    provider.stop()
-    assert provider.available() is False
-
-
-def test_ioctl_result_is_read_from_buffer_not_from_return_value(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """设备名与能力位从 ioctl 的缓冲区取，不能把整数返回值当字节。
-
-    CPython 的 ``fcntl.ioctl`` 在参数是可变缓冲区时原地写入内容、返回
-    系统调用的整数返回。拿返回值当字节会让设备名变成一串零字节、能力位
-    全零，真实机器上 ``available()`` 因此恒为 False。
-    """
-    device = tmp_path / "event0"
-    device.write_bytes(b"\x00" * 24)
-    keyboard_name = "AT Translated Set 2 keyboard"
-    fake = _FakeIoctl(
-        name=keyboard_name,
-        event_bits=_bits(linux_hotkeys.EV_KEY),
-        key_bits=_bits(linux_hotkeys.KEY_A, 116),  # KEY_A 与 KEY_POWER
-    )
-    monkeypatch.setattr(linux_hotkeys, "fcntl", fake)
-
-    fd = os.open(str(device), os.O_RDONLY)
-    try:
-        assert linux_hotkeys._device_name(fd) == keyboard_name
-        event_bits, key_bits = linux_hotkeys._device_capabilities(fd)
-    finally:
-        os.close(fd)
-    assert linux_hotkeys.is_keyboard_capability(event_bits, key_bits) is True
-
-    provider = EvdevHotkeyProvider(root=str(tmp_path))
-    assert provider.available() is True
-
-    # 只含 KEY_POWER(116) 的电源键不是键盘
-    fake.key_bits = _bits(116)
-    assert provider.available() is False
-
-    # 设备名为空不算失败：键盘判定只看能力位
-    fake.name = ""
-    fake.key_bits = _bits(linux_hotkeys.KEY_A)
-    assert provider.available() is True
-
-
-@pytest.mark.skipif(
-    os.geteuid() == 0,
-    reason="root 不受文件权限限制，造不出 PermissionError",
-)
-def test_evdev_provider_permission_denied_is_skipped(tmp_path: Path) -> None:
-    """设备没权限时跳过该设备，available() 为 False，start() 不抛。"""
-    device = tmp_path / "event0"
-    device.write_bytes(b"\x00" * 24)
-    device.chmod(0o000)
-    provider = EvdevHotkeyProvider(root=str(tmp_path))
-
-    assert provider.available() is False
-    provider.start(lambda key, pressed: None)
-    provider.stop()
-
-
-def test_evdev_provider_start_twice_is_safe(tmp_path: Path) -> None:
-    """没有可用键盘时重复 start 也不抛，available() 仍然为 False。"""
-    provider = EvdevHotkeyProvider(root=str(tmp_path))
-    provider.start(lambda key, pressed: None)
-    provider.start(lambda key, pressed: None)
-    provider.stop()
-    assert provider.available() is False
-
-
-# ----------------------------------------------------------------------
-# 平台接线
-# ----------------------------------------------------------------------
-
-
-def test_linux_platform_exposes_evdev_hotkeys() -> None:
-    """Linux 平台对象带 EvdevHotkeyProvider，且满足协议。"""
-    platform = LinuxPlatform()
-    assert isinstance(platform.hotkeys, EvdevHotkeyProvider)
-    assert isinstance(platform.hotkeys, GlobalHotkeyProvider)
 
 
 def test_windows_platform_exposes_null_hotkeys() -> None:
-    """Windows 平台对象带 NullHotkeyProvider。"""
+    """Windows 平台对象带 NullHotkeyProvider，全局热键由 AHK 脚本负责。"""
     platform = WindowsPlatform()
     assert isinstance(platform.hotkeys, NullHotkeyProvider)
     assert platform.hotkeys.available() is False
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="只在 Linux 上断言平台门面的实现",
-)
-def test_get_platform_reuses_one_hotkey_provider() -> None:
-    """门面返回的平台对象反复取 hotkeys，拿到的是同一个实例。"""
-    from app.platform import get_platform
+def _ahk_script() -> Path:
+    """仓库内的 AHK 热键脚本路径。"""
+    return Path(__file__).resolve().parents[1] / "scripts" / "windows" / "hotkeys.ahk"
 
-    assert get_platform().hotkeys is get_platform().hotkeys
+
+def test_ahk_script_exists_and_declares_v2() -> None:
+    """热键脚本存在，并要求 AutoHotkey v2。"""
+    script = _ahk_script()
+    assert script.is_file()
+    text = script.read_text(encoding="utf-8")
+    assert "#Requires AutoHotkey v2.0" in text
+
+
+def test_ahk_script_guards_windows_terminal() -> None:
+    """终端窗口里不接管 F8/F9，避免与终端内绑定重复触发。"""
+    text = _ahk_script().read_text(encoding="utf-8")
+    assert '#HotIf !WinActive("ahk_exe WindowsTerminal.exe")' in text
+    assert "F8::RunHotkey(\"voice-toggle\")" in text
+    assert "F9::RunHotkey(\"screenshot\")" in text
+
+
+def test_ahk_script_calls_cli_hotkey_actions() -> None:
+    """脚本经 ``python -m app.cli hotkey`` 触发两个动作。"""
+    text = _ahk_script().read_text(encoding="utf-8")
+    assert "-m app.cli hotkey " in text
+    assert '"voice-toggle"' in text
+    assert '"screenshot"' in text
+
+
+def test_ahk_script_has_no_machine_specific_paths() -> None:
+    """脚本用自身目录推导仓库根，不写死本机绝对路径。"""
+    text = _ahk_script().read_text(encoding="utf-8")
+    assert "A_ScriptDir" in text
+    assert "D:\\" not in text
+    assert "C:\\Users" not in text
+
+
+# ----------------------------------------------------------------------
+# AHK 调用的 CLI 链路
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        ("voice-toggle", "voice-toggle"),
+        ("screenshot", "screenshot"),
+    ],
+)
+def test_ahk_hotkey_action_reaches_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+    expected: str,
+) -> None:
+    """AHK 调 ``hotkey <动作>`` 时，CLI 把同名动作发到 socket。"""
+    sent: list[str] = []
+
+    def fake_send_request(
+        request_action: str, *args: Any, **kwargs: Any
+    ) -> Response:
+        sent.append(request_action)
+        return Response(ok=True, payload={"result": "ok"})
+
+    monkeypatch.setattr(app.cli, "is_server_alive", lambda path=None: True)
+    monkeypatch.setattr(app.cli, "send_request", fake_send_request)
+
+    assert cli_main(["hotkey", action]) == EXIT_OK
+    assert sent == [expected]
+    assert '"ok": true' in capsys.readouterr().out

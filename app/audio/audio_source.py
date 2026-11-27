@@ -76,7 +76,7 @@ class _DualSourceCapture:
             block_duration_ms=block_duration_ms,
             queue_capacity=queue_capacity,
         )
-        self._monitor = AudioCapture(
+        self._loopback = AudioCapture(
             backend,
             monitor.index,
             source=SOURCE_SYSTEM_MONITOR,
@@ -93,14 +93,14 @@ class _DualSourceCapture:
         return self._microphone
 
     @property
-    def monitor(self) -> AudioCapture:
+    def loopback(self) -> AudioCapture:
         """系统回环那一路。"""
-        return self._monitor
+        return self._loopback
 
     @property
     def is_running(self) -> bool:
         """两路是不是都在采。"""
-        return self._microphone.is_running and self._monitor.is_running
+        return self._microphone.is_running and self._loopback.is_running
 
     async def start(self) -> None:
         """开始采集两路音频。
@@ -109,7 +109,7 @@ class _DualSourceCapture:
         """
         await self._microphone.start()
         try:
-            await self._monitor.start()
+            await self._loopback.start()
         except Exception:
             # 第二路开不起来时把第一路收掉，不留半开的状态
             await self._microphone.stop()
@@ -117,7 +117,7 @@ class _DualSourceCapture:
 
     async def stop(self) -> None:
         """停止采集两路音频。"""
-        await self._monitor.stop()
+        await self._loopback.stop()
         await self._microphone.stop()
 
 
@@ -136,7 +136,7 @@ class SeparatedCapture(_DualSourceCapture):
 
     async def get_system_monitor_block(self) -> AudioBlock:
         """等系统回环那一路的下一块。"""
-        return await self._monitor.get_block()
+        return await self._loopback.get_block()
 
 
 class MixedCapture(_DualSourceCapture):
@@ -216,17 +216,17 @@ class MixedCapture(_DualSourceCapture):
         """取两路的块混成一块，推进混合队列。"""
         while True:
             mic_block = await self._microphone.get_block()
-            monitor_block = await self._monitor.get_block()
-            self._queue.push(self._mix(mic_block, monitor_block))
+            loopback_block = await self._loopback.get_block()
+            self._queue.push(self._mix(mic_block, loopback_block))
 
-    def _mix(self, mic_block: AudioBlock, monitor_block: AudioBlock) -> AudioBlock:
+    def _mix(self, mic_block: AudioBlock, loopback_block: AudioBlock) -> AudioBlock:
         """把两块的波形相加并限幅，成一块混合音频。"""
         import numpy as np
 
-        length = min(mic_block.samples.size, monitor_block.samples.size)
+        length = min(mic_block.samples.size, loopback_block.samples.size)
         mixed = (
             mic_block.samples[:length].astype("float32")
-            + monitor_block.samples[:length].astype("float32")
+            + loopback_block.samples[:length].astype("float32")
         )
         np.clip(mixed, -1.0, 1.0, out=mixed)
         return AudioBlock(

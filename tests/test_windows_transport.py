@@ -1,6 +1,6 @@
 """Windows 侧传输层的单测。
 
-覆盖《9-平台差异与Windows适配》W1 里程碑的完成标准：token 正确 / 错误 /
+覆盖《8-集成与验收》验收清单 Windows 平台一节：token 正确 / 错误 /
 缺失、残留端口文件重建、端口被占，以及 ``E_SOCKET`` 三种失败细分
 （端口文件不存在 / 连不上 / token 不匹配）都能触发。
 """
@@ -44,6 +44,27 @@ async def _echo_server(
                 pass
 
     await transport.start(on_connect)
+
+
+def _recv_or_eof(client: socket.socket) -> bytes:
+    """读一次数据；被拒连接在 Windows 上可能先收到 RST，此时也按 EOF 处理。
+
+    服务端拒绝握手时关闭连接，如果接收缓冲还有未读数据，close 会发 RST，
+    对端 ``recv`` 抛 ``ConnectionResetError``。产品行为本身正确（拒绝连接），
+    这里把 RST 与干净 EOF 视为同一结果。
+    """
+    try:
+        return client.recv(4096)
+    except ConnectionResetError:
+        return b""
+
+
+async def _read_or_eof(reader: asyncio.StreamReader) -> bytes:
+    """异步读一次；被拒连接的 RST 也按 EOF 处理（见 :func:`_recv_or_eof`）。"""
+    try:
+        return await reader.read(4096)
+    except ConnectionResetError:
+        return b""
 
 
 async def test_tcp_transport_roundtrip(tmp_path: Path) -> None:
@@ -101,7 +122,7 @@ async def test_tcp_transport_wrong_token_closes_connection(tmp_path: Path) -> No
         writer.write(b"wrong-token\nping\n")
         await writer.drain()
         # token 不匹配，服务端关连接：读到 EOF
-        assert await reader.read(4096) == b""
+        assert await _read_or_eof(reader) == b""
         writer.close()
         # 协议层没收到任何请求
         assert received == []
@@ -122,7 +143,7 @@ async def test_tcp_transport_missing_token_closes_connection(tmp_path: Path) -> 
         # 不发 token 就发业务请求
         writer.write(b"ping\n")
         await writer.drain()
-        assert await reader.read(4096) == b""
+        assert await _read_or_eof(reader) == b""
         writer.close()
         assert received == []
     finally:
@@ -151,8 +172,12 @@ async def test_tcp_transport_stale_token_file_rejected_by_server(
             """connect 发掉文件里的陈旧 token 后照旧发 JSON 行、读响应。"""
             client = transport.connect(timeout=2.0)
             try:
-                client.sendall(b"ping\n")
-                return client.recv(4096)
+                try:
+                    client.sendall(b"ping\n")
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    # 服务端已拒绝并关闭，后续读按 EOF 处理
+                    pass
+                return _recv_or_eof(client)
             finally:
                 client.close()
 

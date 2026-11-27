@@ -1,6 +1,6 @@
 """Windows 侧进程存活探测的测试。
 
-覆盖《9-平台差异与Windows适配》「Windows 进程存活探测与退出」一节：
+覆盖《接口契约》进程存活探测（psutil）一节：
 :class:`~app.platform.windows.process.PsutilProcessBackend` 对活进程、
 死 PID、非法 PID、权限不足与 PID 复用的判定行为。
 

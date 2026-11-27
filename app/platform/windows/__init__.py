@@ -1,18 +1,13 @@
-"""Windows 平台实现。
+"""Windows 平台门面：mss / WASAPI / psutil / TCP+token。
 
-《9-平台差异与Windows适配》「目录结构」一节里的 Windows 侧五个能力在这里：
+Windows 侧五项能力在这里：
 
 - 截图：``mss``，见 :mod:`app.platform.windows.screenshot`；
 - 音频：WASAPI loopback，见 :mod:`app.platform.windows.audio`；
-- 传输：TCP loopback，见 :mod:`app.platform.windows.transport`；
+- 传输：TCP loopback（端口文件 + token），见 :mod:`app.platform.windows.transport`；
 - 进程存活探测：``psutil``，见 :mod:`app.platform.windows.process`；
 - 编译器：``cl.exe``，见 :mod:`app.platform.windows.compiler`；
-- 全局热键：本轮用 :class:`~app.inputs.global_hotkeys.NullHotkeyProvider` 占位。
-
-本轮五个能力模块都是接口占位，方法体抛 :class:`NotImplementedError`，
-真正的 Windows 后端按《9-平台差异与Windows适配》「实施顺序」一节排在
-Linux 侧 M2 到 M8 之后做。全局热键没有占位实现，直接用
-:class:`~app.inputs.global_hotkeys.NullHotkeyProvider`，``available()`` 恒为 False。
+- 全局热键：用 :class:`~app.inputs.global_hotkeys.NullHotkeyProvider`，``available()`` 恒为 False。
 
 :func:`get_platform` 返回进程内共用的同一个实现，
 :func:`build_platform` 每次新建一个，两者的能力完全一致。
@@ -34,7 +29,7 @@ __all__ = ["WindowsPlatform", "build_platform", "get_platform"]
 
 
 class WindowsPlatform:
-    """Windows 平台实现（本轮只有接口占位）。"""
+    """Windows 平台实现：组装 mss、WASAPI、psutil、TCP+token 与编译器五项能力。"""
 
     # 平台名
     name: str = "win32"

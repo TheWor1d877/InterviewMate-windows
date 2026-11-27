@@ -380,7 +380,7 @@ def redirect_console(path: str | Path) -> Iterator[TextIO]:
     """把 ``sys.stdout`` 与 ``sys.stderr`` 临时接到日志文件，退出时恢复。
 
     第三方库在导入或加载模型时用 ``print()`` 打的提示（torchaudio 的
-    ffmpeg 通知就是一例）会追加进日志文件，不再打断界面。Textual 的 Linux
+    ffmpeg 通知就是一例）会追加进日志文件，不再打断界面。Textual 的终端
     驱动直接写 ``sys.__stderr__``、读 ``sys.__stdin__``，换掉这两个对象
     不影响界面本身。退出时恢复原来的对象并关闭文件。
     """

@@ -2,8 +2,8 @@
 
 见《2-骨架与配置》进程通信一节：客户端连上后发一行请求、读一行响应、断开连接。
 
-连接由平台传输层负责（:func:`app.platform.get_platform`）：Linux 侧是 AF_UNIX
-socket 文件，Windows 侧是 TCP loopback。本模块只管请求与响应的读写。
+连接由平台传输层负责（:func:`app.platform.get_platform`）：Windows 侧是 TCP
+loopback，连接时先发 token 再发请求。本模块只管请求与响应的读写。
 
 连不上（端点不存在、连接被拒、超时）与响应解析失败都抛
 :class:`app.core.exceptions.SocketError`（错误码 ``E_SOCKET``）。

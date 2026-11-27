@@ -1,8 +1,0 @@
-{
-  "uuid": "interviewmate-screenshot@local",
-  "name": "InterviewMate 静默截图",
-  "description": "为 InterviewMate 提供无提示的整屏截图接口，屏幕上不弹任何确认框。",
-  "shell-version": ["48", "49", "50"],
-  "session-modes": ["user"],
-  "version": 1
-}

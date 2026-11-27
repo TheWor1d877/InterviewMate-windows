@@ -10,7 +10,7 @@
 - 收尾：``stop`` 动作先停音频采集再退出界面，
   见《2-骨架与配置》进程通信一节；
 - 命令行：``devices`` 标出系统回环与麦克风，
-  见《9-平台差异与Windows适配》设备枚举一节。
+  见《5-语音输入与流式ASR》音频来源一节。
 
 检索、模型客户端、采集器与 ASR 引擎都用假实现，不连真实服务也不开真流。
 """
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
+
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -305,7 +305,7 @@ def test_default_config_uses_real_providers() -> None:
     assert config.providers.llm == "deepseek"
     assert config.providers.retrieval == "dify"
     assert config.providers.asr == "funasr"
-    assert config.providers.screenshot == "gnome"
+    assert config.providers.screenshot == "mss"
 
 
 async def test_default_config_selects_deepseek_client() -> None:
@@ -348,15 +348,12 @@ def test_default_config_selects_funasr_engine() -> None:
     assert isinstance(engine, FunASREngine)
 
 
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"), reason="gnome 后端只在 Linux 上"
-)
-def test_default_config_selects_gnome_screenshot_backend() -> None:
-    """默认配置的截图后端与 Linux 平台后端一致，都是 gnome。"""
+def test_default_config_selects_mss_screenshot_backend() -> None:
+    """默认配置的截图后端与 Windows 平台后端一致，都是 mss。"""
     config = app.config.load_config()
 
-    assert get_platform().screenshot.name == "gnome"
-    assert config.providers.screenshot == "gnome"
+    assert get_platform().screenshot.name == "mss"
+    assert config.providers.screenshot == "mss"
 
 
 # ----------------------------------------------------------------------

@@ -2,14 +2,10 @@
 LOCAL-NOTES.md
 WIN-MILESTONES.md
 
-# Windows 侧启停脚本（本地目录，不入 Git）
-scripts/windows/
 
 # 根目录本地启停脚本（含机器特定路径，不入 Git）
 /stack.cmd
 
-# Windows 迁移操作指南
-docs/9.1-Windows迁移操作指南.md
 
 # Python
 __pycache__/

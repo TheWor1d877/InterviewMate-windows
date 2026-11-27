@@ -7,14 +7,14 @@
 
 用法::
 
-    ./.venv/bin/python scripts/bench_latency.py                  # 全量 24 条
-    ./.venv/bin/python scripts/bench_latency.py --limit 3        # 只跑前 3 条
-    ./.venv/bin/python scripts/bench_latency.py --out report.md  # 报告写文件
-    ./.venv/bin/python scripts/bench_latency.py --report-only    # 只读上次样本
+    ./.venv/Scripts/python.exe scripts/bench_latency.py                  # 全量 24 条
+    ./.venv/Scripts/python.exe scripts/bench_latency.py --limit 3        # 只跑前 3 条
+    ./.venv/Scripts/python.exe scripts/bench_latency.py --out report.md  # 报告写文件
+    ./.venv/Scripts/python.exe scripts/bench_latency.py --report-only    # 只读上次样本
 
 跑真链路时换一份配置即可::
 
-    ./.venv/bin/python scripts/bench_latency.py --config config/real.yaml
+    ./.venv/Scripts/python.exe scripts/bench_latency.py --config config/real.yaml
 
 配置里把 ``providers.llm`` 改成 ``deepseek``、``providers.retrieval`` 改成
 ``dify``，就会真的发请求；默认配置四个 provider 全是 ``mock``，不发网络请求。

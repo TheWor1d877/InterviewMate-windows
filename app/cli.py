@@ -77,7 +77,7 @@ _STOP_TIMEOUT: float = 10.0
 _AUDIO_TEST_SECONDS: float = 1.0
 
 # 设备类型标签，devices 命令用来区分系统回环与麦克风，
-# 见《9-平台差异与Windows适配》设备枚举一节
+# 见《5-语音输入与流式ASR》音频来源一节
 DEVICE_KIND_LOOPBACK: str = "系统回环"
 DEVICE_KIND_MICROPHONE: str = "麦克风"
 
@@ -181,8 +181,8 @@ def _print_item(state: str, name: str, detail: str = "") -> bool:
 def _cleanup_stale_files() -> list[str]:
     """删掉残留的 PID 文件与通信端点文件，返回删掉的文件路径。
 
-    端点文件由平台传输层清：Linux 侧是 socket 文件，Windows 侧是端口文件与
-    token 文件，见《9-平台差异与Windows适配》。
+    端点文件由平台传输层清：Windows 侧是端口文件与 token 文件，
+    见《2-骨架与配置》进程通信一节。
     """
     removed: list[str] = []
     if PID_PATH.exists():
@@ -315,7 +315,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     """停止主进程。
 
     主进程在运行时发 ``stop`` 动作并等它退出；不在运行时清理残留的 PID 文件与
-    socket 文件。两种情况退出码都是 0。
+    通信端点文件。两种情况退出码都是 0。
 
     :param args: 解析后的参数。
     :returns: 退出码。
@@ -548,8 +548,8 @@ def cmd_devices(args: argparse.Namespace) -> int:
 
     设备表由当前平台的音频后端给出，方括号里是设备在本机枚举结果里的真实索引，
     见《5-语音输入与流式ASR》音频来源一节。每台设备后面标出类型：
-    ``系统回环`` 是 Linux 侧的 monitor source 与 Windows 侧的 WASAPI loopback，
-    ``麦克风`` 是普通的输入设备，见《9-平台差异与Windows适配》设备枚举一节。
+    ``系统回环`` 是 Windows 侧的 WASAPI loopback，
+    ``麦克风`` 是普通的输入设备，见《5-语音输入与流式ASR》音频来源一节。
     系统当前默认的设备在行末标 ``默认``，切换默认设备后重新列一次就能确认。
     音频依赖不可导入或枚举失败时退出码 1，错误码 ``E_AUDIO_DEVICE``。
 

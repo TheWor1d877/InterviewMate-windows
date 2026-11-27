@@ -159,10 +159,11 @@ class InterviewMateApp(App):
     def mark_global_hotkeys_active(self) -> None:
         """标记全局热键监听已接管 F8 与 F9。
 
-        全局监听直接读 ``/dev/input``，终端失焦时也能收到按键，做成按住说话；
-        生效后同一次按键会被 Textual 绑定与全局监听各处理一次，
+        全局热键由 AutoHotkey v2 脚本（``scripts/windows/hotkeys.ahk``）捕获，
+        终端失焦时也能触发；脚本调 ``python -m app.cli hotkey ...`` 通知主进程。
+        生效后同一次按键会被 Textual 绑定与全局链路各处理一次，
         所以界面这边要短路这两个动作，见《5-语音输入与流式ASR》F8 交互一节。
-        全局监听不可用时不要调用本方法，界面绑定保持原来的语义：
+        全局热键链路不可用时不要调用本方法，界面绑定保持原来的语义：
         按一下开始、再按一下停止。
         """
         self._global_hotkeys_active = True
@@ -495,7 +496,7 @@ class InterviewMateApp(App):
     def action_screenshot(self) -> None:
         """F9：截图并立即提交。
 
-        截图后端最多阻塞 120 秒（XDG Portal 兜底要等用户在弹窗里确认），
+        截图后端最多阻塞 120 秒（Windows 侧截图失败时会等待到超时后返回错误提示），
         所以整个流程放后台跑，界面不被卡住。
         截图管理器没有挂上时只写日志，不报错。
         """

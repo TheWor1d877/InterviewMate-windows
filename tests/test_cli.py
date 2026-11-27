@@ -93,7 +93,7 @@ def _mock_config() -> app.config.AppConfig:
 @pytest.fixture
 def runtime_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
     """把 PID 文件与 socket 文件指到 tmp_path，不动仓库里的运行期产物。"""
-    socket_path = tmp_path / "interviewmate.sock"
+    socket_path = tmp_path / "interviewmate.port"
     pid_path = tmp_path / "interviewmate.pid"
     for module in (app.cli, app.main):
         monkeypatch.setattr(module, "SOCKET_PATH", socket_path)
@@ -957,14 +957,14 @@ def test_send_request_uses_platform_transport(
     monkeypatch.setattr(app.runtime.socket_client, "get_platform", lambda: platform)
 
     response = app.runtime.socket_client.send_request(
-        "status", socket_path=tmp_path / "s.sock"
+        "status", socket_path=tmp_path / "s.port"
     )
 
     assert response.ok is True
     assert response.payload == {"ping": "pong"}
     assert len(platform.transports) == 1
     assert platform.transports[0].connect_timeouts == [5.0]
-    assert platform.transports[0].endpoint_path == tmp_path / "s.sock"
+    assert platform.transports[0].endpoint_path == tmp_path / "s.port"
 
 
 def test_is_server_alive_uses_platform_transport(
@@ -974,18 +974,19 @@ def test_is_server_alive_uses_platform_transport(
     platform = _FakePlatform()
     monkeypatch.setattr(app.runtime.socket_client, "get_platform", lambda: platform)
 
-    assert app.runtime.socket_client.is_server_alive(tmp_path / "s.sock") is False
+    assert app.runtime.socket_client.is_server_alive(tmp_path / "s.port") is False
     assert len(platform.transports) == 1
-    assert platform.transports[0].endpoint_path == tmp_path / "s.sock"
+    assert platform.transports[0].endpoint_path == tmp_path / "s.port"
 
 
-def test_required_packages_unchanged_on_linux(config_path: Path) -> None:
-    """Linux 上算出来的依赖包与平台门面改造前一致。"""
+def test_required_packages_unchanged_on_windows(config_path: Path) -> None:
+    """Windows 上算出来的依赖包是音频与截图后端这一套（去重后）。"""
     config = app.main.load_app_config(str(config_path))
 
     packages = app.main.required_packages(config)
 
-    assert packages == app.main.BASE_PACKAGES + ("sounddevice", "dbus_next")
+    # 音频后端要 sounddevice / soundcard（numpy 已在基础包里），截图后端要 mss
+    assert packages == app.main.BASE_PACKAGES + ("sounddevice", "soundcard", "mss")
 
 
 def test_required_packages_include_asr_and_image_packages(tmp_path: Path) -> None:
@@ -996,7 +997,7 @@ def test_required_packages_include_asr_and_image_packages(tmp_path: Path) -> Non
             "llm": "mock",
             "retrieval": "mock",
             "asr": "funasr",
-            "screenshot": "gnome",
+            "screenshot": "mss",
         },
     )
     config = app.main.load_app_config(str(path))
@@ -1005,16 +1006,14 @@ def test_required_packages_include_asr_and_image_packages(tmp_path: Path) -> Non
 
     assert packages == (
         app.main.BASE_PACKAGES
-        + ("sounddevice", "dbus_next")
+        + ("sounddevice", "soundcard", "mss")
         + app.main.ASR_PACKAGES
         + ("PIL",)
     )
 
 
-async def test_start_rejects_screenshot_provider_mismatch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """providers.screenshot 与当前平台的后端不一致时退出码是 3。"""
+def test_screenshot_provider_mss_matches_windows_backend(tmp_path: Path) -> None:
+    """providers.screenshot=mss 能通过配置校验，且与 Windows 平台后端一致。"""
     path = _write_config(
         tmp_path,
         providers={
@@ -1025,20 +1024,17 @@ async def test_start_rejects_screenshot_provider_mismatch(
         },
     )
 
-    code = await app.main.start_process(str(path))
+    config = app.main.load_app_config(str(path))
 
-    assert code == EXIT_CONFIG_ERROR
-    out = capsys.readouterr().out
-    assert "E_CONFIG" in out
-    assert "mss" in out
-    assert "gnome" in out
+    assert config.providers.screenshot == "mss"
+    assert app.main.get_platform().screenshot.name == "mss"
 
 
 def test_no_module_outside_platform_facade_checks_sys_platform() -> None:
     """除 app/platform/ 外，app/ 下不许出现 sys.platform。
 
     平台在进程启动时选定一次，判断只发生在
-    :func:`app.platform.get_platform`，见《9-平台差异与Windows适配》目录结构一节。
+    :func:`app.platform.get_platform`，见《2-骨架与配置》目录结构约定一节。
     """
     app_dir = Path(app.__file__).resolve().parent
     platform_dir = app_dir / "platform"

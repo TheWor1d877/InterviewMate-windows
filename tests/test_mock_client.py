@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import json
-import shutil
+import os
 import subprocess
 from pathlib import Path
 
@@ -421,19 +421,29 @@ async def test_cancel_stops_the_stream(app_config: AppConfig) -> None:
 # ----------------------------------------------------------------------
 # 生成的代码能被编译器接受
 # ----------------------------------------------------------------------
-@pytest.mark.skipif(shutil.which("g++") is None, reason="环境里没有 g++")
+_CPP_COMPILER = __import__(
+    "app.platform.windows.compiler", fromlist=["detect_command"]
+).detect_command()
+
+
+@pytest.mark.skipif(_CPP_COMPILER is None, reason="环境里没有可用的 C++ 编译器")
 async def test_generated_cpp_passes_syntax_check(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
-    """ACM 模式的完整实现能过 g++ 的语法检查。"""
+    """ACM 模式的完整实现能过本机 C++ 编译器（cl.exe 或 MinGW g++）的语法检查。"""
     client = MockClient(app_config)
 
     text = await _collect(client, _messages(_CODING_SYSTEM, _ACM_QUESTION))
 
     source = tmp_path / "main.cpp"
     source.write_text(_code_text(_events(text)), encoding="utf-8")
+    compiler = _CPP_COMPILER or ""
+    if os.path.basename(compiler).lower().startswith("cl"):
+        command = [compiler, "/nologo", "/std:c++17", "/Zs", str(source)]
+    else:
+        command = [compiler, "-std=c++17", "-fsyntax-only", str(source)]
     result = subprocess.run(
-        ["g++", "-std=c++17", "-fsyntax-only", str(source)],
+        command,
         capture_output=True,
         text=True,
         check=False,

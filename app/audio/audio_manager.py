@@ -487,11 +487,11 @@ class AudioManager:
         分离采集有两路，各取各的；单路与混合采集只有一路。
         """
         microphone = getattr(capture, "get_microphone_block", None)
-        monitor = getattr(capture, "get_system_monitor_block", None)
-        if microphone is not None and monitor is not None:
+        loopback = getattr(capture, "get_system_monitor_block", None)
+        if microphone is not None and loopback is not None:
             return [
                 (microphone, SOURCE_MICROPHONE),
-                (monitor, SOURCE_SYSTEM_MONITOR),
+                (loopback, SOURCE_SYSTEM_MONITOR),
             ]
         return [(capture.get_block, str(getattr(capture, "source", "")))]
 
@@ -725,7 +725,7 @@ class AudioManager:
         if queue is not None:
             return [queue]
         queues: list[Any] = []
-        for name in ("microphone", "monitor"):
+        for name in ("microphone", "loopback"):
             side = getattr(capture, name, None)
             side_queue = getattr(side, "queue", None)
             if side_queue is not None:

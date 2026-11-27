@@ -1,18 +1,20 @@
 """全局热键的提供者接口与按键分发。
 
-Textual 的按键绑定只在本终端有焦点时生效，也拿不到松键，做不了
-「按住说话」。这一层把「全局按键」抽象出来：平台后端直接从系统输入拿
-按下与松开，通过 :meth:`GlobalHotkeyProvider.start` 给的回调送出来，
+Textual 的按键绑定只在终端有焦点时生效。Windows 侧的全局热键由
+``scripts/windows/hotkeys.ahk`` 的 AutoHotkey v2 脚本捕获，脚本调
+``python -m app.cli hotkey voice-toggle|screenshot`` 通知主进程。
+这一层保留进程内提供者的抽象：提供者通过
+:meth:`GlobalHotkeyProvider.start` 给的回调送来按下与松开，
 :class:`HotkeyListener` 负责归一键名、按「当前按住集合」去重，再把动作
-投递到事件循环上的回调。
+投递到事件循环上的回调。AHK 脚本是另一条触发链路，不经过这里。
 
 约定：
 
 - 提供者只在 :meth:`GlobalHotkeyProvider.available` 为真时启动；
 - ``emit`` 从后台线程调用，第二个参数 True 是按下、False 是松开；
 - 多台键盘同时上报同一个键时，靠 :class:`HotkeyListener` 的按住集合去重；
-- 不支持全局热键的平台用 :class:`NullHotkeyProvider`，``available()``
-  恒为 False，上层照常接线，不用判断平台。
+- Windows 门面本轮用 :class:`NullHotkeyProvider`，``available()``
+  恒为 False；真正的全局热键由 AHK 脚本负责，上层照常接线，不用判断平台。
 """
 
 from __future__ import annotations
@@ -47,7 +49,8 @@ class HotkeyHandlers:
 class GlobalHotkeyProvider(Protocol):
     """全局按键提供者。
 
-    实现方自己决定按键从哪里来（Linux 侧读 ``/dev/input``），
+    实现方自己决定按键从哪里来：本层由进程内提供者上报，
+    Windows 侧的全局热键则交给 AutoHotkey v2 脚本。
     对外只暴露「能不能用」「开始」「停止」三件事。
     """
 
@@ -72,9 +75,10 @@ class GlobalHotkeyProvider(Protocol):
 
 
 class NullHotkeyProvider:
-    """不支持全局热键的平台用的占位提供者。
+    """进程内没有全局按键来源时用的占位提供者。
 
-    ``available()`` 恒为 False，``start`` 与 ``stop`` 都是空操作。
+    Windows 门面本轮用它：真正的全局热键由 AHK 脚本直接调 CLI，
+    不经过本层。``available()`` 恒为 False，``start`` 与 ``stop`` 都是空操作。
     """
 
     def available(self) -> bool:

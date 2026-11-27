@@ -127,7 +127,7 @@ def test_default_config_loads() -> None:
     assert config.providers.llm == "deepseek"
     assert config.providers.retrieval == "dify"
     assert config.providers.asr == "funasr"
-    assert config.providers.screenshot == "gnome"
+    assert config.providers.screenshot == "mss"
 
 
 def test_default_config_top_level_keys() -> None:
@@ -295,8 +295,8 @@ def test_invalid_screenshot_target_raises_config_error(tmp_path: Path) -> None:
 def test_screenshot_target_rejects_portal_only_targets(tmp_path: Path, target: str) -> None:
     """screenshot.target 不收 Portal 的窗口与区域目标。
 
-    XDG Portal 的截图接口还支持 Window、Area、Active Window 三个目标值，
-    InterviewMate 一律不请求，见《接口契约》XDG Portal 截图目标一节。
+    Windows 截图后端只支持整屏、主屏、指定显示器三种目标，
+    Window、Area、Active Window 这类区域目标一律不接受，见《接口契约》截图目标一节。
     """
     with pytest.raises(ConfigError):
         _load_mutated(tmp_path, lambda data: data["screenshot"].__setitem__("target", target))
@@ -498,19 +498,19 @@ def test_valid_provider_values_accepted(tmp_path: Path) -> None:
     config = _load_mutated(
         tmp_path,
         lambda data: data["providers"].update(
-            {"llm": "deepseek", "retrieval": "dify", "asr": "funasr", "screenshot": "gnome"}
+            {"llm": "deepseek", "retrieval": "dify", "asr": "funasr", "screenshot": "mss"}
         ),
     )
     assert config.providers.llm == "deepseek"
     assert config.providers.retrieval == "dify"
     assert config.providers.asr == "funasr"
-    assert config.providers.screenshot == "gnome"
+    assert config.providers.screenshot == "mss"
 
 
 def test_provider_screenshot_accepts_mss(tmp_path: Path) -> None:
     """providers.screenshot 接受 Windows 侧的 mss 实现名。
 
-    见《9-平台差异与Windows适配》平台能力矩阵：截图实现名两平台不同。
+    见《2-骨架与配置》配置结构一节：截图实现名为 Windows 侧的 mss。
     """
     config = _load_mutated(
         tmp_path, lambda data: data["providers"].__setitem__("screenshot", "mss")

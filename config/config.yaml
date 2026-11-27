@@ -54,7 +54,7 @@ screenshot:
   persist_files: false
   # 截图接口超时（秒）：真实抓屏那一路（接口探测是另一路）的上限，
   # 超时报 E_SCREENSHOT，见《8-集成与验收》超时管理一节。
-  # 走 XDG Portal 时屏幕上会弹确认框，用户点确认可能要一会儿，别设太小
+  # mss 抓屏不弹确认框，单次抓屏通常在几十毫秒内完成，这里留的是宽松上限
   timeout: 150
 
 deepseek:

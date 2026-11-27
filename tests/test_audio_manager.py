@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import dataclass, field
+from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Iterator
 
 import pytest
@@ -39,7 +41,8 @@ from app.audio.funasr_engine import (
 )
 from app.core.exceptions import AsrLoadError
 from app.inputs.hotkey_controller import RESULT_IGNORED, HotkeyController
-from app.platform.types import AudioDevice
+
+from app.platform.windows.audio import WasapiAudioBackend
 from app.utils.timing import MetricRecorder, default_recorder, reset_default_recorder
 
 np = pytest.importorskip("numpy")
@@ -444,63 +447,52 @@ async def test_separate_engines_keep_final_text_per_source() -> None:
 # --------------------------------------------------------------------------
 # 与真实采集层对接
 # --------------------------------------------------------------------------
-class _FakeStream:
-    """假音频流。"""
+class _FakeInputStream:
+    """假 sounddevice InputStream。"""
 
-    def __init__(self) -> None:
-        self.active = True
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.started = False
+        self.closed = False
 
-    @property
-    def is_active(self) -> bool:
-        """流是不是还开着。"""
-        return self.active
+    def start(self) -> None:
+        """开始采集。"""
+        self.started = True
 
     def stop(self) -> None:
+        """停止采集。"""
+        self.started = False
+
+    def close(self) -> None:
         """关掉流。"""
-        self.active = False
+        self.closed = True
 
 
-class _FakeBackend:
-    """假音频后端：记下开的流，按设备推块。"""
+async def test_manager_drives_windows_audio_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """管理器能驱动 Windows 采集后端：块进队列、识别、出最终文本。"""
+    fake = ModuleType("sounddevice")
+    created: dict[str, Any] = {}
+    info = {
+        "name": "麦克风阵列 (Realtek(R) Audio)",
+        "index": 0,
+        "max_input_channels": 2,
+        "max_output_channels": 0,
+        "default_samplerate": 48000.0,
+    }
+    fake.default = SimpleNamespace(device=(0, 0))  # type: ignore[attr-defined]
+    fake.query_devices = lambda device=None, kind=None: dict(info)  # type: ignore[attr-defined]
 
-    name = "fake-audio"
-    required_packages = ()
+    def input_stream(**kwargs: Any) -> _FakeInputStream:
+        """记下开流参数，返回假流。"""
+        created.update(kwargs)
+        return _FakeInputStream(**kwargs)
 
-    def __init__(self) -> None:
-        self.streams: list[dict[str, Any]] = []
+    fake.InputStream = input_stream  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
 
-    def list_devices(self) -> list[AudioDevice]:
-        """列出设备。"""
-        return []
-
-    def record(self, **kwargs: Any) -> Any:
-        """采一段音频，本测试用不到。"""
-        raise NotImplementedError
-
-    def start_stream(
-        self,
-        *,
-        device: int | None,
-        sample_rate: int,
-        channels: int,
-        block_duration_ms: int,
-        on_block: Any,
-    ) -> _FakeStream:
-        """开一路假流。"""
-        self.streams.append({"device": device, "on_block": on_block})
-        return _FakeStream()
-
-    def emit(self, device: int | None) -> None:
-        """模拟采集回调线程推一块音频。"""
-        for stream in self.streams:
-            if stream["device"] == device:
-                stream["on_block"](np.zeros(3200, dtype="float32"))
-
-
-async def test_manager_drives_real_audio_capture() -> None:
-    """管理器能驱动真实的采集层：块进队列、识别、出最终文本。"""
-    backend = _FakeBackend()
-    capture = AudioCapture(backend, 1, source="microphone")
+    capture = AudioCapture(WasapiAudioBackend(), 0, source="microphone")
     engine = _FakeEngine(feed_text=lambda block: "识别到的字")
     partial = _Recorder()
     final = _Recorder()
@@ -514,7 +506,8 @@ async def test_manager_drives_real_audio_capture() -> None:
     )
 
     assert await manager.toggle() == RESULT_STARTED
-    backend.emit(1)
+    # 模拟一次 200 毫秒的立体声回调，采集层下混并重采样成 3200 点
+    created["callback"](np.zeros((9600, 2), dtype="float32"), 9600, None, None)
     await _wait_until(lambda: bool(partial.calls))
     assert partial.calls == [("识别到的字", "microphone")]
 

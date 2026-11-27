@@ -1,7 +1,7 @@
 """假截图后端。
 
-开发期与 CI 里不连 D-Bus、不弹 Portal 窗口，也要能验证「采集 → 处理 →
-提交带图请求」这条链路，所以 ``providers.screenshot=mock`` 时用这个后端：
+开发期与 CI 里不抓真实屏幕，也要能验证「采集 → 处理 → 提交带图请求」
+这条链路，所以 ``providers.screenshot=mock`` 时用这个后端：
 每次采集都返回同一张固定的小 PNG。
 
 这个后端不做任何平台判断，见《4-截图输入与多模态》假截图后端一节。
@@ -101,7 +101,7 @@ MOCK_SCREENSHOT_HEIGHT: int = 180
 class MockScreenshotBackend:
     """假截图后端，实现 :class:`app.platform.types.ScreenshotBackend` 协议。
 
-    采集不碰 D-Bus，不弹 Portal 窗口，只返回固定的小 PNG。
+    采集不抓真实屏幕，只返回固定的小 PNG。
     """
 
     # 后端名，对应配置里 ``providers.screenshot`` 的 mock 取值

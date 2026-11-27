@@ -293,7 +293,12 @@ async def test_server_invalid_json_line_returns_error_and_closes_connection(tmp_
     server = SocketServer(socket_path=socket_path, handlers={"status": lambda request: {}})
     await server.start()
     try:
-        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+        # Windows 侧端点文件里写的是端口号，另有一个 token 文件
+        port = int(socket_path.read_text(encoding="utf-8").strip())
+        token = socket_path.with_suffix(".token").read_text(encoding="utf-8").strip()
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write((token + "\n").encode("utf-8"))
+        await writer.drain()
         writer.write(b"this is not json\n")
         await writer.drain()
         raw = await reader.readline()
@@ -336,15 +341,18 @@ async def test_server_stop_removes_socket_file(tmp_path: Path) -> None:
     assert not socket_path.exists()
 
 
-async def test_server_socket_file_permissions_are_owner_only(tmp_path: Path) -> None:
-    """socket 文件创建后权限收紧到只有属主可读写（0o600）。"""
+async def test_server_writes_port_and_token_files(tmp_path: Path) -> None:
+    """Windows 侧监听后写出端口文件与 token 文件，权限由 token 承担。"""
     socket_path = tmp_path / "s.sock"
     server = SocketServer(socket_path=socket_path, handlers={})
     await server.start()
     try:
-        mode = socket_path.stat().st_mode & 0o777
-        assert mode == 0o600
-        assert mode & 0o077 == 0
+        assert socket_path.exists()
+        port = int(socket_path.read_text(encoding="utf-8").strip())
+        assert 0 < port <= 65535
+        token_path = socket_path.with_suffix(".token")
+        assert token_path.exists()
+        assert token_path.read_text(encoding="utf-8").strip()
     finally:
         await server.stop()
 

@@ -1,14 +1,13 @@
 """Windows 侧的传输层：TCP loopback + token。
 
-见《9-平台差异与Windows适配》「Windows 进程通信」一节：Windows 侧监听
+见《2-骨架与配置》进程通信一节：Windows 侧监听
 ``127.0.0.1`` 上的随机端口，端口号写进端点文件（``runtime/interviewmate.port``），
 随机 token 写进同目录的 ``interviewmate.token``，客户端每次连接都要先发一行
-token。socket 文件在 Linux 侧承担的文件权限隔离，在 Windows 侧由 token 承担。
+token。套接字方案里由文件权限承担的隔离，在 Windows 侧由 token 承担。
 
 本模块把 :mod:`app.runtime.socket_server` 的监听部分与
 :mod:`app.runtime.process_manager` 的端点文件管理搬过来，行为与错误文案
-与 Linux 侧（:mod:`app.platform.linux.transport`）保持一致，差别只在端点
-形态与隔离手段：
+与既有端点文件管理保持一致，差别只在端点形态与隔离手段：
 
 - 端点文件里写的是端口号，token 写进同目录的 ``.token`` 文件；
 - token 握手在传输层做：监听侧先把 ``on_connect`` 包一层，先读一行比对
@@ -30,6 +29,7 @@ token。socket 文件在 Linux 侧承担的文件权限隔离，在 Windows 侧�
 from __future__ import annotations
 
 import asyncio
+import hmac
 import secrets
 import socket
 from collections.abc import Awaitable, Callable
@@ -48,6 +48,10 @@ _TOKEN_FILE_SUFFIX: str = ".token"
 
 # 探测端点有没有被活进程占用时的连接超时，秒
 _PROBE_TIMEOUT: float = 1.0
+
+# 拒绝连接前读空接收缓冲的等待上限，秒。防止接收缓冲还有未读数据时
+# close() 在 Windows 上发 RST，让对端 recv 抛 ConnectionResetError。
+_REJECT_DRAIN_TIMEOUT: float = 0.05
 
 
 class TcpLoopbackTransport:
@@ -108,8 +112,10 @@ class TcpLoopbackTransport:
             raise
         try:
             port = self._server.sockets[0].getsockname()[1]
-            self._endpoint_path.write_text(f"{port}\n", encoding="utf-8")
+            # 先写 token 再写端口：客户端以端口文件为启动信号，读到端口时
+            # token 一定已经就位，避免「读到端口却读不到 token」的中间窗口。
             self._token_path.write_text(f"{self._token}\n", encoding="utf-8")
+            self._endpoint_path.write_text(f"{port}\n", encoding="utf-8")
         except BaseException:
             server, self._server = self._server, None
             server.close()
@@ -221,8 +227,8 @@ class TcpLoopbackTransport:
     ) -> Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]:
         """给 ``on_connect`` 包一层 token 握手。
 
-        先读一行比对 token：空行（连上就断的占用探测）或不匹配都直接断开，
-        协议层无感知；匹配才把连接交给 ``on_connect``。
+        先读一行比对 token：空行（连上就断的占用探测）静默关闭、不记 WARNING；
+        非空但 token 不匹配才记 WARNING 并断开；匹配才把连接交给 ``on_connect``。
         """
 
         async def handler(
@@ -233,25 +239,54 @@ class TcpLoopbackTransport:
                 line = await reader.readline()
             except (ConnectionResetError, BrokenPipeError, OSError):
                 # 对端连上就断（占用探测）或握手时网络出错，直接收尾
-                await self._close_writer(writer)
+                await self._close_writer(reader, writer)
                 return
             text = line.decode("utf-8", errors="replace").strip()
-            if not line or text != self._token:
+            if not text:
+                # 空行：占用探测（is_endpoint_in_use / is_server_alive）连上就断，
+                # 不是 token 校验失败，静默关闭即可，避免误报 WARNING。
+                await self._close_writer(reader, writer)
+                return
+            if not hmac.compare_digest(text, self._token):
                 log_event(
                     "socket.error",
                     "token 校验未通过，断开连接",
                     level="WARNING",
                     path=str(self._endpoint_path),
                 )
-                await self._close_writer(writer)
+                await self._close_writer(reader, writer)
                 return
             await on_connect(reader, writer)
 
         return handler
 
     @staticmethod
-    async def _close_writer(writer: asyncio.StreamWriter) -> None:
-        """关闭连接，写不出去时的错误忽略。"""
+    async def _close_writer(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """拒绝连接或收尾时关闭：先读空接收缓冲，再半关闭让对端读到 EOF。
+
+        Windows 上若接收缓冲还有未读数据就 ``close()``，会向对端发 RST，
+        对端 ``recv`` 抛 ``ConnectionResetError`` 而不是干净 EOF。这里先把已到
+        的数据读掉（带超时，避免对端既不发也不关时卡住），再用 ``write_eof``
+        发 FIN，最后正常关闭，保证对端看到 EOF。任何一步出错都忽略。
+        """
+        try:
+            while True:
+                chunk = await asyncio.wait_for(
+                    reader.read(65536), timeout=_REJECT_DRAIN_TIMEOUT
+                )
+                if not chunk:
+                    break
+        except (asyncio.TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
+            pass
+        try:
+            if writer.can_write_eof():
+                writer.write_eof()
+                await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass
         try:
             writer.close()
             await writer.wait_closed()

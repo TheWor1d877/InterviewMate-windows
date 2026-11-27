@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "interviewmate"
 version = "0.1.0"
-description = "Ubuntu 终端里的面试辅助程序"
+description = "Windows 终端里的面试辅助程序"
 requires-python = ">=3.11"
 dependencies = [
     # 依赖表见《2-骨架与配置》依赖一节
@@ -18,7 +18,9 @@ dependencies = [
     "numpy",
     "sounddevice",
     "pillow",
-    "dbus-next",
+    "mss>=10.2.0",
+    "soundcard>=0.4.6",
+    "psutil>=7.2.2",
     "funasr",
     "modelscope",
     "torch",

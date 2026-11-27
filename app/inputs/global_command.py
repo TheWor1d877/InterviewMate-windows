@@ -1,6 +1,6 @@
 """socket 事件转内部动作。
 
-桌面快捷键（``./interviewmate hotkey voice-toggle``）通过 socket 把动作送给主进程，
+桌面快捷键（``interviewmate.cmd hotkey voice-toggle``）通过 socket 把动作送给主进程，
 主进程这边把协议里的 action 映射到内部动作处理器，见《8-集成与验收》全局快捷键一节
 与《2-骨架与配置》进程通信一节。
 

@@ -52,8 +52,8 @@ from app.core.exceptions import (
     ConfigError,
     ScreenshotError,
 )
-from app.platform.linux.audio import SoundDeviceAudioBackend
-from app.platform.linux.screenshot import GnomeScreenshotBackend
+from app.platform.windows.audio import WasapiAudioBackend
+from app.platform.windows.screenshot import MssScreenshotBackend
 from app.platform.types import Screenshot
 from app.vision.image_processor import ProcessedImage
 from app.vision.screenshot_manager import ScreenshotManager
@@ -363,9 +363,11 @@ def test_config_timeouts_reach_the_code_paths() -> None:
     """三个超时项都接到了真正用它们的地方。"""
     config = load_config()
 
-    assert SoundDeviceAudioBackend().init_timeout == float(config.audio.init_timeout)
+    assert WasapiAudioBackend().init_timeout == float(config.audio.init_timeout)
     assert FunASREngine().init_timeout == float(config.asr.init_timeout)
-    assert GnomeScreenshotBackend().timeout == float(config.screenshot.timeout)
+    # 截图超时由 ScreenshotManager 在采集时取 config.screenshot.timeout 限时，
+    # 对应下面的 test_screenshot_manager_reports_capture_timeout
+    assert config.screenshot.timeout > 0
 
 
 # --------------------------------------------------------------------------
@@ -378,8 +380,10 @@ def test_audio_device_enumeration_times_out(
     module = ModuleType("sounddevice")
     module.query_devices = _slow_query_devices  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sounddevice", module)
+    # soundcard 不可用，枚举只走 sounddevice 一路，便于制造超时
+    monkeypatch.setitem(sys.modules, "soundcard", None)
 
-    backend = SoundDeviceAudioBackend(init_timeout=0.05)
+    backend = WasapiAudioBackend(init_timeout=0.05)
     with pytest.raises(AudioDeviceError) as excinfo:
         backend.list_devices()
 
@@ -394,7 +398,7 @@ def test_audio_stream_open_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     module.query_devices = _slow_query_devices  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sounddevice", module)
 
-    backend = SoundDeviceAudioBackend(init_timeout=0.05)
+    backend = WasapiAudioBackend(init_timeout=0.05)
     with pytest.raises(AudioDeviceError) as excinfo:
         backend.start_stream(
             device=None,
@@ -497,25 +501,26 @@ async def test_asr_load_timeout_keeps_the_background_load(
 # --------------------------------------------------------------------------
 # 截图接口超时
 # --------------------------------------------------------------------------
-async def test_screenshot_capture_times_out(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """真实抓屏卡住时超时中断，报 E_SCREENSHOT。"""
-    backend = GnomeScreenshotBackend(timeout=0.05)
+async def test_screenshot_probe_times_out() -> None:
+    """mss 取显示器列表卡住时探测超时中断，报 E_SCREENSHOT。"""
+    backend = MssScreenshotBackend()
 
-    async def _hang() -> Any:
-        """连不上总线，一直挂着。"""
-        await asyncio.sleep(5)
-        return None
+    def _slow_monitors() -> list[dict[str, Any]]:
+        """取显示器列表卡住不返回。"""
+        time.sleep(0.05)
+        return [
+            {"left": 0, "top": 0, "width": 800, "height": 600},
+            {"left": 0, "top": 0, "width": 800, "height": 600},
+        ]
 
-    monkeypatch.setattr(backend, "_open_bus", _hang)
+    backend._list_monitors = _slow_monitors
 
     with pytest.raises(ScreenshotError) as excinfo:
-        await backend.capture()
+        await backend.probe(timeout=0.001)
 
     assert excinfo.value.code == SCREENSHOT_ERROR_CODE
     assert "超时" in excinfo.value.message
-    assert "0.05" in excinfo.value.message
+    assert "0.001" in excinfo.value.message
 
 
 async def test_screenshot_manager_reports_capture_timeout(tmp_path: Path) -> None:

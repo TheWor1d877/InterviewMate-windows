@@ -35,7 +35,8 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("假检索后端不该发起网络请求")
 
-    monkeypatch.setattr(socket.socket, "connect", _boom)
+    # 注意：不 patch socket.socket.connect —— Windows 的 Proactor 事件循环
+    # 内部用 socketpair 建自管道，会走 connect，patch 掉会让事件循环本身起不来。
     monkeypatch.setattr(socket, "create_connection", _boom)
     monkeypatch.setattr(socket, "getaddrinfo", _boom)
     monkeypatch.setattr(httpx.AsyncClient, "send", _boom)
@@ -157,9 +158,7 @@ async def test_different_keywords_give_different_order() -> None:
     shot_results = await retriever.retrieve("截图扩展怎么抓整屏")
 
     assert event_results[0].document_name == "app/core/event_bus.py"
-    assert shot_results[0].document_name == (
-        "extensions/interviewmate-screenshot/extension.js"
-    )
+    assert shot_results[0].document_name == "app/platform/windows/screenshot.py"
     assert [item.document_name for item in event_results] != [
         item.document_name for item in shot_results
     ]

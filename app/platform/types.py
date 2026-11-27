@@ -1,18 +1,18 @@
 """平台能力接口定义。
 
-《9-平台差异与Windows适配》「目录结构」一节把平台相关能力收进 :mod:`app.platform`：
-上层拿到的接口在两个平台同构，平台相关的内容只落在
-:mod:`app.platform.linux` 与 :mod:`app.platform.windows` 两个子包里。
+《2-骨架与配置》目录结构约定一节把平台相关能力收进 :mod:`app.platform`：
+上层拿到的接口在各平台同构，平台相关的内容只落在
+:mod:`app.platform.windows` 子包里。
 
 这里只放数据结构与 Protocol，不放实现：
 
-- :class:`AudioDevice` 是音频设备表的一行，字段对应《9-平台差异与Windows适配》
-  「界面契约」一节的音频设备枚举；
+- :class:`AudioDevice` 是音频设备表的一行，字段对应《接口契约》
+  音频后端（WASAPI）一节的音频设备枚举；
 - :class:`Screenshot` 是一次截图的结果，内容在内存里，不落盘；
 - 七个 Protocol 分别描述截图、音频、传输、进程、编译器、全局热键与平台门面本身。
 
 每个 Protocol 都有 ``required_packages`` 属性，值是该能力真正需要的第三方包名；
-不需要额外包时是空元组。Windows 侧不装 ``dbus-next``，差别就体现在这个属性上。
+不需要额外包时是空元组。各后端按需声明自己的依赖，差别就体现在这个属性上。
 """
 
 from __future__ import annotations
@@ -54,13 +54,12 @@ ScreenshotTarget = Literal["screen", "primary", "monitor"]
 class AudioDevice:
     """本机的一个音频设备。
 
-    字段与《9-平台差异与Windows适配》「界面契约」一节的音频设备枚举一一对应：
+    字段与《接口契约》音频后端（WASAPI）一节的音频设备枚举一一对应：
 
-    - ``name`` 是设备名，Windows 上的设备名与 Linux 不同；
+    - ``name`` 是设备名，Windows 上的设备名由 WASAPI 枚举给出；
     - ``index`` 是设备在本机枚举结果里的真实索引，不是枚举顺序；
     - ``is_input`` 表示这是输入设备；
-    - ``is_loopback`` 表示这是系统回环设备（Linux 的 monitor source、
-      Windows 的 WASAPI loopback）；
+    - ``is_loopback`` 表示这是系统回环设备（Windows 的 WASAPI loopback）；
     - ``default_samplerate`` 是设备默认采样率；
     - ``channels`` 是设备的输入声道数；
     - ``is_default`` 表示这是系统当前的默认设备，默认输入设备与默认输出
@@ -104,8 +103,7 @@ class Screenshot:
     """一次截图的结果。
 
     图片内容在内存里，不落盘：字段 ``data`` 是图片字节，``width`` 与 ``height``
-    是像素尺寸。Windows 侧用 ``mss`` 直接取内存里的位图，Linux 侧读 Portal
-    返回的临时文件，两边交给上层的形态一致。
+    是像素尺寸。Windows 侧用 ``mss`` 直接取内存里的位图，交给上层的形态一致。
     """
 
     data: bytes
@@ -309,7 +307,7 @@ class Platform(Protocol):
     判断只发生在 :func:`app.platform.get_platform`。
     """
 
-    # 平台名，取值是 ``linux`` 或 ``win32``
+    # 平台名，Windows 侧是 ``win32``
     name: str
 
     # 平台用到的全部第三方包名，不需要额外包时是空元组

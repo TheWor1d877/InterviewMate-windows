@@ -183,9 +183,7 @@ class ScreenshotSettings(BaseModel):
     enabled: bool
     # 截图目标：screen 是整屏（多显示器时拼成一张），primary 是主屏幕，
     # monitor 是指定的那块屏（序号看 monitor 字段）。
-    # XDG Portal 的截图接口还支持 Window、Area、Active Window 三个目标值，
-    # InterviewMate 一律不请求，依据《接口契约》XDG Portal 截图目标一节
-    # 与《9-平台差异与Windows适配》。必填，不给默认值。
+    # 只收这三个值，窗口与区域截图不提供。必填，不给默认值。
     target: ScreenshotTarget
     # target 是 monitor 时抓第几块屏，0 起数；其他目标下这个值被忽略。
     monitor: int = Field(default=0, ge=0)
@@ -195,7 +193,7 @@ class ScreenshotSettings(BaseModel):
     persist_files: bool
     # 截图接口超时（秒）：真实抓屏那一路（不是接口探测那一路）的上限，
     # 超时报 E_SCREENSHOT，见《8-集成与验收》「超时管理」一节。
-    # 走 XDG Portal 时屏幕上会弹确认框，用户点确认可能要一会儿，别设太小。
+    # mss 抓屏不弹确认框，单次抓屏通常在几十毫秒内完成，150 秒是宽松上限。
     # 给默认值而不是必填：老的手写配置里没有这一项也能加载。
     timeout: int = Field(default=150, gt=0)
 
@@ -286,8 +284,8 @@ class PrivacySettings(BaseModel):
 class ProviderSettings(BaseModel):
     """各外部能力的实现选择。
 
-    默认走真实实现（deepseek/dify/funasr/gnome）；测试与本地开发改成
-    mock，对应实现不连真实服务、不加载模型。
+    默认走真实实现（deepseek/dify/funasr/mss）；测试与本地开发改成
+    mock，对应实现不连真实服务、不加载模型、不抓真实屏幕。
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -295,10 +293,9 @@ class ProviderSettings(BaseModel):
     llm: Literal["mock", "deepseek"]
     retrieval: Literal["mock", "dify"]
     asr: Literal["mock", "funasr"]
-    # 截图实现名：mock 不做真实截图，gnome 是 Linux 侧的实现
-    # （GNOME Shell 扩展静默抓屏，扩展没装时回退 XDG Portal），
-    # mss 是 Windows 侧的 mss 实现，见《9-平台差异与Windows适配》平台能力矩阵
-    screenshot: Literal["mock", "gnome", "mss"]
+    # 截图实现名：mock 不做真实截图，mss 是 Windows 侧的 mss 实现，
+    # 见《2-骨架与配置》配置结构一节
+    screenshot: Literal["mock", "mss"]
 
 
 class AppConfig(BaseModel):
