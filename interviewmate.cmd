@@ -22,6 +22,12 @@ if defined PYTHONPATH (
   set "PYTHONPATH=%REPO_ROOT%"
 )
 
+rem 仅在 start 子命令时尝试拉起全局热键脚本；失败只提示，不阻断启动
+if /i "%~1"=="start" (
+  call "%REPO_ROOT%\scripts\windows\start-hotkeys.cmd"
+  if errorlevel 1 echo [interviewmate] Global hotkey helper did not start; continuing.
+)
+
 rem 退出码原样透传
 "%PYTHON%" -m app.cli %*
 exit /b %ERRORLEVEL%

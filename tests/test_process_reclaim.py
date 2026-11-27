@@ -206,3 +206,39 @@ def test_terminate_processes_skips_dead_target() -> None:
     assert report.killed == ()
     assert report.survived == ()
     assert pid in report.skipped
+
+def test_find_app_processes_excludes_ancestors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """祖先进程即使命令行像本应用也不在扫描结果里。
+
+    ``.venv\\Scripts\\python.exe`` 是启动器，命令行与真正跑脚本的子进程相同；
+    把它当残留终止会连带终止当前进程（Windows 上以退出码 15 静默结束）。
+    """
+    parent = os.getppid()
+    other = 12345
+
+    class _Proc:
+        """只带 ``info["pid"]`` 的进程替身。"""
+
+        def __init__(self, pid: int) -> None:
+            self.info = {"pid": pid}
+
+    monkeypatch.setattr(
+        psutil, "process_iter", lambda attrs=None: [_Proc(parent), _Proc(other)]
+    )
+    monkeypatch.setattr(pm, "is_app_process", lambda pid: True)
+
+    found = find_app_processes()
+    assert parent not in found
+    assert other in found
+
+
+def test_terminate_processes_skips_ancestor() -> None:
+    """祖先进程不被当回收目标，避免连带终止当前进程。"""
+    parent = os.getppid()
+    report = terminate_processes([os.getpid(), parent], timeout=0.1)
+    assert os.getpid() in report.skipped
+    assert parent in report.skipped
+    assert report.terminated == ()
+    assert report.killed == ()

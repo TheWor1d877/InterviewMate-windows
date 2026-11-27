@@ -1510,12 +1510,19 @@ def assemble_global_hotkeys(
     active_provider = provider if provider is not None else get_platform().hotkeys
     voice_key = config.hotkeys.voice_toggle.strip().lower()
     screenshot_key = config.hotkeys.screenshot.strip().lower()
-    bindings: dict[str, HotkeyHandlers] = {
-        voice_key: HotkeyHandlers(
+    # F8 与 voice-toggle 一致采用切换语义：按一次开始，再按一次停止并提交。
+    toggle_voice = getattr(state, "toggle_voice_capture", None)
+    if callable(toggle_voice):
+        voice_handlers = HotkeyHandlers(
+            on_press=_hotkey_action(toggle_voice, voice_key, "toggle"),
+        )
+    else:
+        # 调用方没有切换入口时退回按下开始、松开停止，保持兼容
+        voice_handlers = HotkeyHandlers(
             on_press=_hotkey_action(state.start_voice_capture, voice_key, "press"),
             on_release=_hotkey_action(state.stop_voice_capture, voice_key, "release"),
         )
-    }
+    bindings: dict[str, HotkeyHandlers] = {voice_key: voice_handlers}
     if screenshot_key == voice_key:
         log_event(
             "main.hotkeys.conflict",

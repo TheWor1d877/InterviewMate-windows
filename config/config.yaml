@@ -34,7 +34,7 @@ audio:
 asr:
   enabled: true
   model: paraformer-zh-streaming
-  device: cpu
+  device: auto
   cpu_fallback: true
   vad_enabled: true
   preload: true

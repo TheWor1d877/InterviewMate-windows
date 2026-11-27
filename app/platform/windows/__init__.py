@@ -7,7 +7,8 @@ Windows 侧五项能力在这里：
 - 传输：TCP loopback（端口文件 + token），见 :mod:`app.platform.windows.transport`；
 - 进程存活探测：``psutil``，见 :mod:`app.platform.windows.process`；
 - 编译器：``cl.exe``，见 :mod:`app.platform.windows.compiler`；
-- 全局热键：用 :class:`~app.inputs.global_hotkeys.NullHotkeyProvider`，``available()`` 恒为 False。
+- 全局热键：:class:`~app.platform.windows.hotkeys.AhkHotkeyProvider`，按 AutoHotkey
+  进程与 hotkeys.ahk 脚本路径探测可用性。
 
 :func:`get_platform` 返回进程内共用的同一个实现，
 :func:`build_platform` 每次新建一个，两者的能力完全一致。
@@ -17,10 +18,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.inputs.global_hotkeys import NullHotkeyProvider
 from app.platform.types import Platform, Transport
 from app.platform.windows.audio import WasapiAudioBackend
 from app.platform.windows.compiler import MsvcCompiler
+from app.platform.windows.hotkeys import AhkHotkeyProvider
 from app.platform.windows.process import PsutilProcessBackend
 from app.platform.windows.screenshot import MssScreenshotBackend
 from app.platform.windows.transport import TcpLoopbackTransport
@@ -39,7 +40,8 @@ class WindowsPlatform:
         self.audio = WasapiAudioBackend()
         self.process = PsutilProcessBackend()
         self.compiler = MsvcCompiler()
-        self.hotkeys = NullHotkeyProvider()
+        self.hotkeys = AhkHotkeyProvider()
+
 
     @property
     def required_packages(self) -> tuple[str, ...]:

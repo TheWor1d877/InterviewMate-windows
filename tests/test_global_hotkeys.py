@@ -6,9 +6,9 @@
   一次 ``on_press``，松开触发一次 ``on_release``，没按过直接松开不触发，
   ``stop()`` 之后到达的按键一律丢弃；
 - 提供者不可用、启动抛异常时 ``start()`` 返回 False 且不向外抛；
-- Windows 平台门面用 :class:`~app.inputs.global_hotkeys.NullHotkeyProvider`；
-- AutoHotkey v2 脚本：存在、带 v2 声明与 ``#HotIf`` 终端保护、
-  F8/F9 分别触发 ``hotkey voice-toggle`` 与 ``hotkey screenshot``，
+- Windows 平台门面用 :class:`~app.platform.windows.hotkeys.AhkHotkeyProvider`；
+- AutoHotkey v2 脚本：存在、带 v2 声明、F8/F9 全局无条件注册，
+  分别触发 ``hotkey voice-toggle`` 与 ``hotkey screenshot``，
   且脚本里不写死本机绝对路径；
 - AHK 调用的 CLI 链路：``hotkey voice-toggle|screenshot`` 按动作发到 socket，
   socket 侧用假实现，不连真实主进程。
@@ -32,6 +32,7 @@ from app.inputs.global_hotkeys import (
 )
 from app.main import EXIT_OK
 from app.platform.windows import WindowsPlatform
+from app.platform.windows.hotkeys import AhkHotkeyProvider
 from app.runtime.socket_protocol import Response
 
 # ----------------------------------------------------------------------
@@ -303,11 +304,10 @@ def test_null_provider_is_always_unavailable() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_windows_platform_exposes_null_hotkeys() -> None:
-    """Windows 平台对象带 NullHotkeyProvider，全局热键由 AHK 脚本负责。"""
+def test_windows_platform_exposes_ahk_hotkeys() -> None:
+    """Windows 平台对象带 AhkHotkeyProvider，由它探测 AHK 是否接管 F8/F9。"""
     platform = WindowsPlatform()
-    assert isinstance(platform.hotkeys, NullHotkeyProvider)
-    assert platform.hotkeys.available() is False
+    assert isinstance(platform.hotkeys, AhkHotkeyProvider)
 
 
 def _ahk_script() -> Path:
@@ -323,10 +323,14 @@ def test_ahk_script_exists_and_declares_v2() -> None:
     assert "#Requires AutoHotkey v2.0" in text
 
 
-def test_ahk_script_guards_windows_terminal() -> None:
-    """终端窗口里不接管 F8/F9，避免与终端内绑定重复触发。"""
+def test_ahk_script_registers_hotkeys_globally() -> None:
+    """F8/F9 全局无条件注册。
+
+    AHK 可用时界面会短路自己的 F8/F9 绑定，所以脚本不能在前台排除终端，
+    否则「界面短路 + AHK 不接管」会变成两边都不响应。
+    """
     text = _ahk_script().read_text(encoding="utf-8")
-    assert '#HotIf !WinActive("ahk_exe WindowsTerminal.exe")' in text
+    assert "#HotIf" not in text
     assert "F8::RunHotkey(\"voice-toggle\")" in text
     assert "F9::RunHotkey(\"screenshot\")" in text
 

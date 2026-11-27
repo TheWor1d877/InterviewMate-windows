@@ -164,8 +164,8 @@ async def test_wide_terminal_title_is_truncated_to_panel_width() -> None:
 # ----------------------------------------------------------------------
 # 右侧「关键回答内容」
 # ----------------------------------------------------------------------
-async def test_append_item_renders_keyword_and_sentence_on_one_line() -> None:
-    """append_item 把关键词与句子渲染成同一行的「关键点：正文」。"""
+async def test_append_item_renders_keyword_and_sentence_on_separate_lines() -> None:
+    """append_item 让小标题独占一行，正文另起一行。"""
     app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -173,7 +173,8 @@ async def test_append_item_renders_keyword_and_sentence_on_one_line() -> None:
         answer.append_item("s1", "RAII", "通过对象生命周期自动管理资源。")
         await pilot.pause()
         lines = answer.plain_text().splitlines()
-        assert lines[0] == "RAII：通过对象生命周期自动管理资源。"
+        assert lines[0] == "RAII"
+        assert lines[1] == "通过对象生命周期自动管理资源。"
 
 
 async def test_answer_panel_scrolls_with_mouse_wheel() -> None:

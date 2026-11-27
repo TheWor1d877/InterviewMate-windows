@@ -102,6 +102,33 @@ def _norm_path(path: Path | str) -> str:
     return os.path.normcase(os.path.normpath(str(path)))
 
 
+def _ancestor_pids() -> set[int]:
+    """返回当前进程的祖先 PID 集合，父进程、祖父进程一直往上。
+
+    ``.venv\\Scripts\\python.exe`` 是 venv 启动器，它会再起一个真正的
+    python 进程跑脚本；启动器的命令行与子进程几乎一样、工作目录也在仓库根，
+    会被 :func:`find_app_processes` 当成"上次残留的主进程"。
+    终止启动器会连带终止当前进程（Windows 上以退出码 15 静默结束），
+    所以祖先链上的进程一律不当回收对象。
+
+    读不到父进程时返回已经收集到的部分，不往外抛。
+    """
+    import psutil
+
+    ancestors: set[int] = set()
+    try:
+        proc = psutil.Process(os.getpid())
+        while True:
+            parent = proc.parent()
+            if parent is None or parent.pid <= 1 or parent.pid in ancestors:
+                break
+            ancestors.add(parent.pid)
+            proc = parent
+    except (psutil.Error, NotImplementedError, AttributeError, OSError):
+        return ancestors
+    return ancestors
+
+
 def _read_cmdline(pid: int) -> tuple[str, ...]:
     """读进程命令行参数元组，读不到返回空元组。
 
@@ -193,6 +220,8 @@ def find_app_processes(*, exclude: Iterable[int] = ()) -> tuple[int, ...]:
 
     skip = set(exclude)
     skip.add(os.getpid())
+    # venv 启动器与当前进程命令行相同，杀了它会连带杀掉当前进程
+    skip |= _ancestor_pids()
     found: list[int] = []
     for proc in psutil.process_iter(["pid"]):
         try:
@@ -233,7 +262,9 @@ def terminate_processes(
     """先 ``terminate()``，等不到退出再 ``kill()``。
 
     调用方负责挑出该结束的进程；这里只挡明显不该动的目标：
-    小于等于 1、就是自己、已经不在的 PID。
+    小于等于 1、就是自己、当前进程的祖先链、已经不在的 PID。
+    祖先链要挡是因为 venv 启动器的命令行与本应用主进程相同，
+    终止它会连带终止当前进程。
 
     注意 Windows 上 ``terminate()`` 即 ``TerminateProcess``，本身就是强制结束，
     没有可捕获的优雅退出，因此多数情况下进程会直接记入 ``terminated``，
@@ -246,8 +277,9 @@ def terminate_processes(
 
     targets: list[int] = []
     skipped: list[int] = []
+    protected = {os.getpid()} | _ancestor_pids()
     for pid in dict.fromkeys(pids):
-        if pid <= 1 or pid == os.getpid() or not is_process_running(pid):
+        if pid <= 1 or pid in protected or not is_process_running(pid):
             skipped.append(pid)
             continue
         targets.append(pid)

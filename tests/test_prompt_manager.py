@@ -97,17 +97,17 @@ def test_prompt_states_answer_rules() -> None:
 
 
 def test_prompt_caps_total_items_and_leads_with_conclusion() -> None:
-    """关键点总数有上限，同主题合并，第一条先说结论。"""
+    """要点总数有上限，第一条先给结论。"""
     for prompt in (NORMAL_SYSTEM_PROMPT, SCREENSHOT_SYSTEM_PROMPT):
-        assert "5 到 8 个" in prompt
-        assert "先说结论" in prompt
+        assert "3 到 5 个" in prompt
+        assert "先给结论" in prompt
 
 
 def test_prompt_limits_sentence_length() -> None:
-    """正文规则写在两套 system 里：单句上限，每条两到三句。"""
+    """正文规则写在两套 system 里：每句上限，每条一到两句正文。"""
     for prompt in (NORMAL_SYSTEM_PROMPT, SCREENSHOT_SYSTEM_PROMPT):
-        assert "单句不超过 30 个汉字" in prompt
-        assert "2 到 3 句" in prompt
+        assert "每句不超过 25 字" in prompt
+        assert "1 到 2 句正文" in prompt
 
 
 def test_prompt_tells_model_to_restore_spoken_question() -> None:

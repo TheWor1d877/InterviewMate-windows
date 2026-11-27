@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from rich.console import Group, RenderableType
 from rich.syntax import Syntax
 from rich.text import Text
+from textual.timer import Timer
 from textual.widgets import Static
 
 from app.utils.logger import log_event
@@ -65,6 +67,9 @@ COMPLETE_MARK = "✓"
 
 # 代码题思路块的小标题
 APPROACH_TITLE = "思路"
+
+# 流式追加时合并 layout 刷新的时间窗口（秒），落在 50~100ms 区间内
+REFRESH_THROTTLE_INTERVAL = 0.075
 
 
 def _step_field(step: Any, name: str) -> str:
@@ -120,6 +125,11 @@ class AnswerPanel(Static):
         self._notice: str = ""
         # 代码题的解题步骤，渲染成代码上方的思路块
         self._code_steps: list[Any] = []
+        # 流式追加的刷新节流：窗口内挂起的刷新与到期补刷的定时器
+        self._refresh_timer: Timer | None = None
+        self._refresh_pending: bool = False
+        # 上一次真正发出 layout 刷新的时刻，用来划分合并窗口
+        self._last_refresh_at: float = 0.0
         super().__init__("", markup=False, **kwargs)
 
     # ------------------------------------------------------------------
@@ -143,7 +153,7 @@ class AnswerPanel(Static):
             )
             return
         self._entries.append((KIND_ITEM, section_id, keyword, sentence))
-        self.refresh(layout=True)
+        self._request_refresh()
 
     def append_fallback(self, text: str) -> None:
         """追加兜底文本。
@@ -160,7 +170,7 @@ class AnswerPanel(Static):
             )
             return
         self._entries.append((KIND_FALLBACK, "", "", text))
-        self.refresh(layout=True)
+        self._request_refresh()
 
     def append_code(self, text: str) -> None:
         """追加一段代码。
@@ -174,7 +184,7 @@ class AnswerPanel(Static):
             return
         self._code_buffer.append(text)
         self._mode = MODE_CODE
-        self.refresh(layout=True)
+        self._request_refresh()
 
     def enter_code_mode(self) -> None:
         """切到代码形态，但不渲染任何内容。
@@ -251,6 +261,61 @@ class AnswerPanel(Static):
         self._code_steps = []
         self._mode = MODE_NORMAL
         self.refresh(layout=True)
+
+    # ------------------------------------------------------------------
+    # 刷新节流
+    # ------------------------------------------------------------------
+    def _request_refresh(self) -> None:
+        """请求一次 layout 刷新，把 50~100ms 内的多次追加合并成少量刷新。
+
+        流式追加是高频路径，逐条 ``refresh(layout=True)`` 会让每个事件都触发
+        全屏 reflow。这里用时间窗口合并：窗口首次追加立即刷新，窗口内其余追加
+        挂起，窗口到期统一补刷一次，保证最后一次追加一定会被刷新。
+        """
+        self._refresh_pending = True
+        if not self.is_mounted:
+            # 还没挂到界面上时没有消息循环，直接刷新即可
+            self._refresh_pending = False
+            self.refresh(layout=True)
+            return
+        now = time.monotonic()
+        if now - self._last_refresh_at < REFRESH_THROTTLE_INTERVAL:
+            # 窗口内：等定时器到期补刷
+            self._ensure_refresh_timer()
+            return
+        # 窗口外：立即刷新一次，后续请求在窗口内合并
+        self._last_refresh_at = now
+        self._refresh_pending = False
+        self.refresh(layout=True)
+        self._ensure_refresh_timer()
+
+    def _ensure_refresh_timer(self) -> None:
+        """确保窗口到期时有一次补刷，未挂载时不创建定时器。"""
+        if self._refresh_timer is None and self.is_mounted:
+            self._refresh_timer = self.set_timer(
+                REFRESH_THROTTLE_INTERVAL, self._on_refresh_timer
+            )
+
+    def _on_refresh_timer(self) -> None:
+        """节流窗口到期：把窗口内挂起的刷新补上。"""
+        self._refresh_timer = None
+        self._flush_refresh()
+        self._last_refresh_at = time.monotonic()
+
+    def _flush_refresh(self) -> None:
+        """执行挂起的 layout 刷新，没有挂起时什么也不做。"""
+        if not self._refresh_pending:
+            return
+        self._refresh_pending = False
+        self.refresh(layout=True)
+
+    def flush_pending(self) -> None:
+        """立即执行挂起的刷新，流结束时保证结束态布局完整。"""
+        if self._refresh_timer is not None:
+            self._refresh_timer.stop()
+            self._refresh_timer = None
+        self._flush_refresh()
+        self._last_refresh_at = time.monotonic()
 
     # ------------------------------------------------------------------
     # 状态
@@ -390,10 +455,10 @@ class AnswerPanel(Static):
                 # 两条内容之间空一行，读起来清楚些
                 text.append("\n")
             if kind == KIND_ITEM:
-                # 关键点与正文同一行，读起来是段落而不是一串小标题
+                # 小标题独占一行，正文另起一行，读起来是分点而不是一坨段落
                 if keyword:
                     text.append(keyword, style="bold")
-                    text.append("：")
+                    text.append("\n")
                 text.append(content)
             else:
                 text.append(content)

@@ -336,6 +336,10 @@ class EventDispatcher:
         """整体完成，并检查这次代码题有没有返回代码。"""
         self._done = True
         self._report_empty_code(event)
+        # 流结束时把追加节流中挂起的刷新立刻补上，保证结束态布局完整
+        flush_pending = getattr(self._answer, "flush_pending", None)
+        if callable(flush_pending):
+            flush_pending()
 
     def _report_empty_code(self, event: StreamEvent) -> None:
         """代码题一个代码片段都没收到时，右栏给一行提示并记一条 WARNING。
