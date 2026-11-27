@@ -1,0 +1,109 @@
+app:
+  name: InterviewMate
+  language: zh-CN
+  log_level: INFO
+
+ui:
+  left_ratio: 22
+  right_ratio: 78
+  min_width: 90
+  syntax_highlighting: true
+  auto_scroll: true
+  show_status_bar: true
+  show_text_input: true
+
+hotkeys:
+  voice_toggle: F8
+  screenshot: F9
+  new_question: ctrl+n
+  cancel: escape
+  reanalyze: F10
+  show_rag_sources: F3
+  quit: q
+
+audio:
+  enabled: true
+  source: auto
+  sample_rate: 16000
+  channels: 1
+  chunk_duration_ms: 200
+  # 音频设备初始化超时（秒）：设备枚举与开流这两步的上限，
+  # 超时报 E_AUDIO_DEVICE，见《8-集成与验收》超时管理一节
+  init_timeout: 10
+
+asr:
+  enabled: true
+  model: paraformer-zh-streaming
+  device: cpu
+  cpu_fallback: true
+  vad_enabled: true
+  preload: true
+  # ASR 初始化超时（秒）：模型加载的上限，预热与首次识别时的懒加载都算，
+  # 超时报 E_ASR_LOAD，见《8-集成与验收》超时管理一节
+  init_timeout: 60
+
+screenshot:
+  enabled: true
+  # 抓图目标：screen 是整屏（多显示器时拼成一张），primary 是主屏幕，
+  # monitor 是指定的那块屏（序号看下面的 monitor）。
+  target: primary
+  # target 是 monitor 时抓第几块屏，0 起数；其他目标下这个值被忽略。
+  monitor: 0
+  max_edge: 1600
+  format: png
+  persist_files: false
+  # 截图接口超时（秒）：真实抓屏那一路（接口探测是另一路）的上限，
+  # 超时报 E_SCREENSHOT，见《8-集成与验收》超时管理一节。
+  # 走 XDG Portal 时屏幕上会弹确认框，用户点确认可能要一会儿，别设太小
+  timeout: 150
+
+deepseek:
+  base_url: https://api.deepseek.com
+  # 模型选的是 deepseek-flash，它声明支持 image 输入模态，截图这条路依赖它。
+  # 换模型前先确认新模型支不支持图片。
+  model: deepseek-flash
+  stream: true
+  thinking: disabled
+  reasoning_effort: low
+  temperature: 0.3
+  max_output_tokens: 2048
+  connect_timeout: 5
+  read_timeout: 60
+  max_retries: 1
+
+rag:
+  enabled: true
+  top_k: 4
+  timeout: 8
+  max_context_chars: 8000
+  score_threshold_enabled: false
+  score_threshold: 0.0
+  reranking_enable: false
+  force_project_mode: false
+
+# Dify 检索服务的连接参数，取值见《2-骨架与配置》环境变量一节
+# 真实部署用 .env 里的 DIFY_BASE_URL / DIFY_DATASET_ID / DIFY_DATASET_API_KEY 覆盖
+dify:
+  base_url: http://your-dify-host/v1
+  dataset_id: your_dataset_id
+  api_key: your_dataset_api_key
+
+coding:
+  language: cpp
+  standard: cpp17
+  submission_mode: auto
+  compile_validation: false
+
+privacy:
+  persist_audio: false
+  persist_transcripts: false
+  persist_screenshots: false
+  redact_secrets_in_logs: true
+
+# 四个外部能力的实现选择。默认走真实实现；测试与本地开发时改成 mock，
+# 对应实现不连真实服务、不加载模型。
+providers:
+  llm: deepseek
+  retrieval: dify
+  asr: funasr
+  screenshot: mss

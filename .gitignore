@@ -1,0 +1,44 @@
+# 本地笔记：不入 Git
+LOCAL-NOTES.md
+WIN-MILESTONES.md
+
+# Windows 侧启停脚本（本地目录，不入 Git）
+scripts/windows/
+
+# 根目录本地启停脚本（含机器特定路径，不入 Git）
+/stack.cmd
+
+# Windows 迁移操作指南
+docs/9.1-Windows迁移操作指南.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv
+venv
+
+# 环境与密钥
+.arts
+.env
+.env.local
+interviewmate.env
+
+# 运行期产物（只忽略仓库根，不影响 app/runtime/ 包目录）
+/logs/
+/runtime/
+*.log
+
+# 本地模型权重（目录联接指向外部，不入 Git）
+/models/
+
+# 工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/

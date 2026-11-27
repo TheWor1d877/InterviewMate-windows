@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# InterviewMate 启动脚本
+#
+# 当前 CLI 还是占位实现：只转发到 app.cli 的占位版本。
+# 真实子命令（start/warmup/stop/status/test/devices/audio-test/hotkey）
+# 见《2-骨架与配置》命令行入口一节。
+#
+# 用法：./interviewmate [子命令]
+
+set -euo pipefail
+
+# 从脚本自身位置推导仓库根，不依赖当前工作目录
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
+
+# 优先用仓库内的 venv 解释器，没有则退回系统 python3
+if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+  PYTHON="$REPO_ROOT/.venv/bin/python"
+else
+  PYTHON="python3"
+fi
+
+# 让 -m app.cli 在任意工作目录下都能找到 app 包
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# exec 让退出码透传
+exec "$PYTHON" -m app.cli "$@"

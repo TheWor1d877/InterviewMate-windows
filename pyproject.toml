@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "interviewmate"
+version = "0.1.0"
+description = "Ubuntu 终端里的面试辅助程序"
+requires-python = ">=3.11"
+dependencies = [
+    # 依赖表见《2-骨架与配置》依赖一节
+    "textual",
+    "rich",
+    "httpx",
+    "pydantic",
+    "PyYAML",
+    "python-dotenv",
+    "numpy",
+    "sounddevice",
+    "pillow",
+    "dbus-next",
+    "funasr",
+    "modelscope",
+    "torch",
+    "kaldi-native-fbank",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

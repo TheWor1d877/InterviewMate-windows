@@ -1,0 +1,91 @@
+/* InterviewMate 终端界面样式。
+   结构依据《3-文本输入与流式回答》终端界面一节：顶部状态栏、中间左右两栏、
+   底部文字输入框、输入框下面的快捷键提示栏。两栏宽度由 app/ui/layout.py 在
+   on_resize 里按配置算出，这里只给高度、边框与配色。 */
+
+/* 顶部状态栏：两行，第一行六项状态，第二行提示位。
+   底色是中性深色，不用高亮色 */
+#status-bar {
+    height: 2;
+    width: 100%;
+    padding: 0 1;
+    background: $panel;
+    color: $text;
+}
+
+/* 中间左右两栏内容区 */
+#content-columns {
+    height: 1fr;
+    width: 100%;
+}
+
+/* 左栏：回答流程 */
+#left-panel {
+    height: 1fr;
+    padding: 0 1;
+    border-right: solid $border;
+    color: $text-muted;
+}
+
+/* 右栏容器：上面是当前问题，下面是回答内容 */
+#right-column {
+    height: 1fr;
+    width: 1fr;
+}
+
+/* 右栏顶部：当前问题，题目加粗，底下一条线把题目与回答内容分开 */
+#question-header {
+    height: auto;
+    max-height: 4;
+    width: 100%;
+    padding: 0 1;
+    border-bottom: solid $border;
+    color: $text;
+}
+
+/* 右栏滚动容器：回答内容超出高度时用鼠标滚轮上下翻 */
+#answer-scroll {
+    height: 1fr;
+    width: 100%;
+}
+
+/* 右栏：关键回答内容，高度随内容增长，超出部分由外层容器滚动 */
+#right-panel {
+    height: auto;
+    width: 100%;
+    padding: 0 1;
+    color: $text;
+}
+
+/* 底部输入区：多行文本框，只留一条上边框 */
+#input-area {
+    height: 3;
+    width: 100%;
+    border: none;
+    border-top: solid $border;
+    padding: 0 1;
+    background: $surface;
+    color: $text;
+}
+
+/* 底部快捷键提示栏：左边快捷键列表，右边退出键 */
+#hotkey-bar {
+    height: 1;
+    width: 100%;
+    background: $surface;
+}
+
+#hotkey-main {
+    width: 1fr;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-wrap: nowrap;
+}
+
+#hotkey-exit {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
