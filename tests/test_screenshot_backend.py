@@ -90,6 +90,9 @@ class _FakeMss:
     def mss(self) -> _FakeSct:
         return self.sct
 
+    def MSS(self) -> _FakeSct:
+        return self.sct
+
 
 def _use_fake_mss(backend: MssScreenshotBackend, sct: _FakeSct) -> None:
     """把后端用的 mss 模块换成假模块。"""

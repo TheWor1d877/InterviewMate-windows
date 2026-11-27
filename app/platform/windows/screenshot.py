@@ -102,7 +102,7 @@ class MssScreenshotBackend:
         """抓一张图并转成 PNG 字节。"""
         mss = self._import_mss()
         try:
-            sct = mss.mss()
+            sct = mss.MSS()
         except Exception as exc:
             raise ScreenshotError(f"mss 初始化失败：{exc}") from exc
         try:
@@ -140,7 +140,7 @@ class MssScreenshotBackend:
         """取显示器列表，失败转成截图错误。"""
         mss = self._import_mss()
         try:
-            sct = mss.mss()
+            sct = mss.MSS()
         except Exception as exc:
             raise ScreenshotError(f"mss 初始化失败：{exc}") from exc
         try:
