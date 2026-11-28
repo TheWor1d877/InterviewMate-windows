@@ -1,17 +1,19 @@
 """顶部状态栏。
 
-状态栏独立于内容区，显示六项，取值见《2-骨架与配置》状态字段取值表，
+状态栏独立于内容区，显示八项，前六项取值见《2-骨架与配置》状态字段取值表，
 摆放位置见《3-文本输入与流式回答》终端界面一节的布局图。
-六项固定顺序为 RUNNING、AUDIO、ASR、DIFY、DEEPSEEK、TTFT。
+八项固定顺序为 RUNNING、AUDIO、ASR、DIFY、MODEL、TTFT、MODE、SESSION，
+后两项是项目模式加的：MODE 显示当前是项目模式还是普通模式，
+SESSION 显示当前会话 ID，没有会话时显示占位符。
 
-状态栏是两行：第一行是六项状态，第二行是提示位，放错误码与一句话，
-例如 ``E_DEEPSEEK_TIMEOUT 请求超时``，没有提示时第二行为空。
+状态栏是两行：第一行是八项状态，第二行是提示位，放错误码与一句话，
+例如 ``E_MODEL_TIMEOUT 请求超时``，没有提示时第二行为空。
 
 状态行按段着色：应用名加粗，标签与分隔符用弱化色，取值用正文色；
 提示位是错误码时用错误色。底色是中性深色，不用高亮色。
 
 终端窄的时候整行放不下，右端会被直接裁掉，TTFT 那段看不见。
-状态栏按控件宽度自适应：放不下就从尾部去掉整项（先 TTFT，再 DEEPSEEK……），
+状态栏按控件宽度自适应：放不下就从尾部去掉整项（先 SESSION，再 MODE、TTFT……），
 只剩应用名还放不下才截断应用名。
 """
 
@@ -35,7 +37,7 @@ __all__ = [
     "AUDIO_VALUES",
     "ASR_VALUES",
     "DIFY_VALUES",
-    "DEEPSEEK_VALUES",
+    "MODEL_VALUES",
     "DEFAULT_APP_NAME",
     "TTFT_EMPTY",
     "ERROR_CODE_PREFIX",
@@ -44,8 +46,18 @@ __all__ = [
 ]
 
 
-# 六项的固定顺序，与《3-文本输入与流式回答》终端界面一节的布局图一致
-STATUS_ORDER: tuple[str, ...] = ("running", "audio", "asr", "dify", "deepseek", "ttft")
+# 八项的固定顺序，与《3-文本输入与流式回答》终端界面一节的布局图一致，
+# mode 与 session 是项目模式加的两项
+STATUS_ORDER: tuple[str, ...] = (
+    "running",
+    "audio",
+    "asr",
+    "dify",
+    "model",
+    "ttft",
+    "mode",
+    "session",
+)
 
 # 短标签，状态栏用短标签不用文字描述
 STATUS_LABELS: dict[str, str] = {
@@ -53,8 +65,10 @@ STATUS_LABELS: dict[str, str] = {
     "audio": "AUDIO",
     "asr": "ASR",
     "dify": "DIFY",
-    "deepseek": "DEEPSEEK",
+    "model": "MODEL",
     "ttft": "TTFT",
+    "mode": "MODE",
+    "session": "SESSION",
 }
 
 # 各字段的合法取值，见《2-骨架与配置》状态字段取值表
@@ -62,7 +76,7 @@ RUNNING_VALUES: tuple[str, ...] = ("running", "stopped")
 AUDIO_VALUES: tuple[str, ...] = ("off", "on")
 ASR_VALUES: tuple[str, ...] = ("idle", "loading", "ready", "error")
 DIFY_VALUES: tuple[str, ...] = ("offline", "ready", "degraded")
-DEEPSEEK_VALUES: tuple[str, ...] = ("idle", "connecting", "streaming", "error")
+MODEL_VALUES: tuple[str, ...] = ("idle", "connecting", "streaming", "error")
 
 # 字段名到合法取值的映射，供参数校验使用
 FIELD_VALUES: dict[str, tuple[str, ...]] = {
@@ -70,7 +84,7 @@ FIELD_VALUES: dict[str, tuple[str, ...]] = {
     "audio": AUDIO_VALUES,
     "asr": ASR_VALUES,
     "dify": DIFY_VALUES,
-    "deepseek": DEEPSEEK_VALUES,
+    "model": MODEL_VALUES,
 }
 
 # 各字段的初始取值，与 StatusUpdate 的默认值保持一致
@@ -79,7 +93,7 @@ DEFAULT_FIELD_VALUES: dict[str, str] = {
     "audio": "off",
     "asr": "idle",
     "dify": "offline",
-    "deepseek": "idle",
+    "model": "idle",
 }
 
 # 应用名默认值，真实取值来自配置里的 app.name
@@ -91,6 +105,12 @@ TTFT_EMPTY = "-"
 # 错误码的前缀，提示位以它开头就按错误色显示
 ERROR_CODE_PREFIX = "E_"
 
+# 模式字段的合法取值与显示文本：项目模式显示「项目」，普通模式显示「普通」
+MODE_LABELS: dict[str, str] = {"normal": "普通", "project": "项目"}
+
+# 会话 ID 没有时显示的占位
+SESSION_EMPTY = "-"
+
 
 class StatusUpdate(Event):
     """状态栏更新事件。"""
@@ -100,7 +120,7 @@ class StatusUpdate(Event):
     audio: str = "off"
     asr: str = "idle"
     dify: str = "offline"
-    deepseek: str = "idle"
+    model: str = "idle"
     ttft_ms: float | None = None
     hint: str = ""
 
@@ -108,15 +128,17 @@ class StatusUpdate(Event):
 class StatusBar(Static):
     """顶部状态栏：两行文本。
 
-    第一行是六项状态，渲染格式固定为::
+    第一行是八项状态，渲染格式固定为::
 
-        {应用名} | RUNNING={值} | AUDIO={值} | ASR={值} | DIFY={值} | DEEPSEEK={值} | TTFT={值}
+        {应用名} | RUNNING={值} | AUDIO={值} | ASR={值} | DIFY={值} | MODEL={值} | TTFT={值} | MODE={值} | SESSION={值}
 
     第二行是提示位，放错误码与一句话，没有提示时为空行。
 
-    TTFT 有值时显示整数毫秒数，没有值时显示 ``-``。
+    TTFT 有值时显示整数毫秒数，没有值时显示 ``-``；
+    MODE 取 ``MODE_LABELS`` 里的显示文本（普通 / 项目）；
+    SESSION 是当前会话 ID，没有会话时显示 ``-``。
 
-    :meth:`render` 返回六项齐全的固定格式；真正画到屏幕上的是
+    :meth:`render` 返回八项齐全的固定格式；真正画到屏幕上的是
     :meth:`render_line`，它按控件宽度裁剪：放不下就从尾部去掉整项，
     只剩应用名还放不下才截断应用名。窄终端下不会出现被硬裁掉一半的字段。
     """
@@ -128,6 +150,10 @@ class StatusBar(Static):
         self._ttft_ms: float | None = None
         # 第二行的提示文本
         self._hint: str = ""
+        # 项目模式字段：normal / project
+        self._mode: str = "normal"
+        # 当前会话 ID，没有会话时是 None
+        self._session_id: str | None = None
         # on_resize 记下的控件宽度，渲染阶段拿不到宽度时用它兜底
         self._width: int = 0
         # 主题里的颜色变量，第一次用到时取一次就缓存起来
@@ -182,11 +208,15 @@ class StatusBar(Static):
         return base + Style(color=self._theme_color("text-secondary"))
 
     def _entries(self) -> list[tuple[str, str]]:
-        """六项状态，返回 (标签, 取值) 列表，顺序按 :data:`STATUS_ORDER`。"""
+        """八项状态，返回 (标签, 取值) 列表，顺序按 :data:`STATUS_ORDER`。"""
         entries: list[tuple[str, str]] = []
         for key in STATUS_ORDER:
             if key == "ttft":
                 entries.append((STATUS_LABELS[key], self._format_ttft()))
+            elif key == "mode":
+                entries.append((STATUS_LABELS[key], MODE_LABELS[self._mode]))
+            elif key == "session":
+                entries.append((STATUS_LABELS[key], self._session_id or SESSION_EMPTY))
             else:
                 entries.append((STATUS_LABELS[key], self._values[key]))
         return entries
@@ -211,7 +241,7 @@ class StatusBar(Static):
     def _fit_entries(self, entries: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], str]:
         """按可用宽度裁剪状态行。
 
-        放不下就从尾部去掉整项（先 TTFT，再 DEEPSEEK……），
+        放不下就从尾部去掉整项（先 TTFT，再 MODEL……），
         只剩应用名还放不下时再截断应用名。
 
         :param entries: 六项状态。
@@ -246,11 +276,15 @@ class StatusBar(Static):
         return "".join(kept) + "…"
 
     def status_snapshot(self) -> dict[str, str]:
-        """返回六项状态的字符串快照，键顺序与 :data:`STATUS_ORDER` 一致。"""
+        """返回八项状态的字符串快照，键顺序与 :data:`STATUS_ORDER` 一致。"""
         snapshot: dict[str, str] = {}
         for key in STATUS_ORDER:
             if key == "ttft":
                 snapshot[key] = self._format_ttft()
+            elif key == "mode":
+                snapshot[key] = MODE_LABELS[self._mode]
+            elif key == "session":
+                snapshot[key] = self._session_id or SESSION_EMPTY
             else:
                 snapshot[key] = self._values[key]
         return snapshot
@@ -265,7 +299,7 @@ class StatusBar(Static):
         audio: str = "off",
         asr: str = "idle",
         dify: str = "offline",
-        deepseek: str = "idle",
+        model: str = "idle",
         ttft_ms: float | None = None,
         hint: str = "",
     ) -> None:
@@ -282,7 +316,7 @@ class StatusBar(Static):
             "audio": audio,
             "asr": asr,
             "dify": dify,
-            "deepseek": deepseek,
+            "model": model,
         }
         # 先整体校验再写入，避免非法取值造成状态写了一半
         for field, value in candidates.items():
@@ -300,7 +334,7 @@ class StatusBar(Static):
         self.refresh()
 
     def set_hint(self, hint: str) -> None:
-        """只更新提示位，不动六项状态。
+        """只更新提示位，不动状态项。
 
         :param hint: 提示位文本，空串表示没有提示。
         """
@@ -311,6 +345,38 @@ class StatusBar(Static):
     def hint(self) -> str:
         """当前提示位文本。"""
         return self._hint
+
+    def set_mode(self, mode: str) -> None:
+        """更新模式字段：项目模式是 ``project``，普通模式是 ``normal``。
+
+        :param mode: 模式取值。
+        :raises ValueError: 取值不在 :data:`MODE_LABELS` 里。
+        """
+        if mode not in MODE_LABELS:
+            raise ValueError(
+                f"状态字段 mode 的取值非法：{mode!r}，"
+                f"合法取值为 {'、'.join(MODE_LABELS)}"
+            )
+        self._mode = mode
+        self.refresh()
+
+    @property
+    def mode(self) -> str:
+        """当前模式取值：``normal`` 或 ``project``。"""
+        return self._mode
+
+    def set_session(self, session_id: str | None) -> None:
+        """更新当前会话 ID。
+
+        :param session_id: 会话 ID，None 或空串按没有会话处理，显示占位符。
+        """
+        self._session_id = (session_id or "").strip() or None
+        self.refresh()
+
+    @property
+    def session_id(self) -> str | None:
+        """当前会话 ID，没有会话时是 None。"""
+        return self._session_id
 
     # ------------------------------------------------------------------
     # 内部工具

@@ -1,7 +1,7 @@
 """截图图片处理器的测试。
 
 覆盖《4-截图输入与多模态》图片处理一节的缩放、格式与内存内处理规则，
-以及《接口契约》DeepSeek 图片输入限制一节的单边像素、单图体积与请求体体积上限。
+以及《接口契约》模型图片输入限制一节的单边像素、单图体积与请求体体积上限。
 
 测试里的图片都用 Pillow 现造，不依赖任何真实截图。
 """
@@ -231,7 +231,7 @@ def test_processing_writes_no_file(
 
 
 def test_limits_match_contract_values() -> None:
-    """三个上限常量与《接口契约》DeepSeek 图片输入限制一节一致。"""
+    """三个上限常量与《接口契约》模型图片输入限制一节一致。"""
     assert MAX_EDGE_LIMIT == 8192
     assert MAX_IMAGE_BYTES == 32 * 1024 * 1024
     assert MAX_REQUEST_BYTES == 48 * 1024 * 1024

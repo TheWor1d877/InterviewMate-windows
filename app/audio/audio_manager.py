@@ -40,6 +40,7 @@ from app.audio.audio_devices import (
 )
 from app.audio.funasr_engine import (
     ASR_FINAL_LATENCY_METRIC,
+    DEFAULT_SAMPLE_RATE,
     STATE_ERROR,
     STATE_LOADING,
     STATE_READY,
@@ -60,6 +61,7 @@ __all__ = [
     "DEFAULT_INIT_TIMEOUT",
     "FINAL_LATENCY_SOURCE",
     "AsrEngine",
+    "FinalRefiner",
     "AudioManager",
     "Capture",
     "CaptureFactory",
@@ -110,6 +112,24 @@ class AsrEngine(Protocol):
 
     async def flush(self) -> str:
         """冲刷，返回剩下的文本。"""
+        ...
+
+
+@runtime_checkable
+class FinalRefiner(Protocol):
+    """最终文本重识别器的调用约定。
+
+    默认实现是 :class:`~app.audio.sensevoice_engine.SenseVoiceEngine`：
+    整段录音重识别加拼音级热词纠正，见《5-语音输入与流式ASR》
+    「重识别与热词纠正」一节。单元测试注入假实现。
+    """
+
+    async def recognize(self, audio: Any, sample_rate: int) -> str:
+        """整段重识别一段音频，返回热词纠正后的最终文本。"""
+        ...
+
+    async def correct_text(self, text: str) -> str:
+        """只做热词纠正，不碰音频。重识别降级到流式文本时用。"""
         ...
 
 
@@ -189,6 +209,11 @@ class AudioManager:
         两边都累加会把同一段文字接成两遍。
         界面层改成替换显示之后，这里打开开关，
         管理器就把当前这段语音的累计文本传过去。
+    :param final_refiner: 最终文本重识别器，None 时不重识别，
+        最终文本就是流式结果。给了的话停止采集时优先用整段录音
+        重识别加热词纠正产出最终文本，重识别失败退回流式文本
+        （同样过热词纠正），见《5-语音输入与流式ASR》
+        「重识别与热词纠正」一节。
     :param init_timeout: 音频设备初始化超时秒数，None 时取进程里加载好的
         配置里的 ``audio.init_timeout``，见《8-集成与验收》「超时管理」一节。
     """
@@ -203,6 +228,7 @@ class AudioManager:
         on_partial_text: TextCallback | None = None,
         asr_engine_factory: AsrEngineFactory | None = None,
         partial_text_cumulative: bool = False,
+        final_refiner: FinalRefiner | None = None,
         init_timeout: float | None = None,
     ) -> None:
         self._capture_factory = capture_factory
@@ -212,6 +238,7 @@ class AudioManager:
         self._on_partial_text = on_partial_text
         self._engine_factory = asr_engine_factory
         self._partial_text_cumulative = bool(partial_text_cumulative)
+        self._final_refiner = final_refiner
         self._init_timeout = init_timeout
 
         self._capture: Capture | None = None
@@ -433,7 +460,8 @@ class AudioManager:
         submitted = False
         # 一次停止只记一条 asr_final_latency：多路都出了文本时按第一段算
         latency_recorded = False
-        for source, text in finals:
+        for source, text, recording in finals:
+            text = await self._refine_final(source, text, recording)
             text = text.strip()
             if not text:
                 continue
@@ -648,17 +676,24 @@ class AudioManager:
             )
         return self._engine, True
 
-    async def _flush_streams(self) -> list[tuple[str, str]]:
+    async def _flush_streams(self) -> list[tuple[str, str, Any]]:
         """冲刷各路识别流。
 
-        :returns: 每路来源的最终文本，文本与来源标签一对。
+        冲刷之前先把整段录音缓存取走交给重识别：
+        ``FunASREngine.take_recording`` 必须在 ``flush`` 之前调，
+        冲刷会把录音缓存清掉。录音归喂得最多的一路
+        （与冲刷尾巴的归属一致），其余路没有录音可给。
+
+        :returns: 每路来源的最终文本，文本、来源标签与整段录音一对；
+            引擎没有录音缓存（假引擎或不支持重识别）时录音是 None。
         """
         by_engine: dict[int, list[_Stream]] = {}
         for stream in self._streams.values():
             by_engine.setdefault(id(stream.engine), []).append(stream)
 
-        results: list[tuple[str, str]] = []
+        results: list[tuple[str, str, Any]] = []
         for streams in by_engine.values():
+            recording = self._take_recording(streams[0].engine)
             remainder = ""
             try:
                 remainder = await streams[0].engine.flush()
@@ -679,8 +714,92 @@ class AudioManager:
                 text = "".join(stream.parts)
                 if stream is owner:
                     text += remainder
-                results.append((stream.source, text))
+                results.append(
+                    (stream.source, text, recording if stream is owner else None)
+                )
         return results
+
+    def _take_recording(self, engine: AsrEngine) -> Any:
+        """取走引擎的整段录音缓存。
+
+        引擎没有 ``take_recording`` 方法（假引擎、mock）时返回 None，
+        重识别跳过，最终文本退回流式结果加热词纠正。
+
+        :param engine: 这一路来源用的引擎。
+        :returns: float32 的一维波形，引擎不支持时是 None。
+        """
+        take = getattr(engine, "take_recording", None)
+        if take is None:
+            return None
+        try:
+            return take()
+        except Exception as exc:
+            log_event(
+                "audio.recording.take_failed",
+                f"取整段录音缓存失败，重识别退回流式结果：{exc}",
+                level="WARNING",
+                error=str(exc),
+            )
+            return None
+
+    async def _refine_final(self, source: str, text: str, recording: Any) -> str:
+        """产出一路来源的最终文本：重识别优先，流式结果兜底。
+
+        有整段录音且重识别器可用时，用 SenseVoice 重识别整段音频
+        加热词纠正；重识别失败、结果为空或没有录音时，退回流式文本
+        （同样过一遍热词纠正），口径与重识别路径一致。
+
+        :param source: 来源标签，日志里标明是哪一路降级。
+        :param text: 流式识别的最终文本。
+        :param recording: 整段录音缓存，None 时表示没有录音可用。
+        :returns: 最终文本。
+        """
+        refiner = self._final_refiner
+        if refiner is None:
+            return text
+        if recording is not None and getattr(recording, "size", 0) > 0:
+            try:
+                refined = await refiner.recognize(recording, DEFAULT_SAMPLE_RATE)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_event(
+                    "audio.refine.failed",
+                    f"重识别失败，退回流式文本：{exc}",
+                    level="WARNING",
+                    error=str(exc),
+                    source=source,
+                )
+            else:
+                refined = refined.strip()
+                if refined:
+                    return refined
+                log_event(
+                    "audio.refine.empty",
+                    "重识别结果为空，退回流式文本",
+                    level="WARNING",
+                    source=source,
+                )
+        else:
+            log_event(
+                "audio.refine.no_recording",
+                "这一路没有整段录音缓存，最终文本保持流式结果",
+                level="DEBUG",
+                source=source,
+            )
+        try:
+            return await refiner.correct_text(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_event(
+                "audio.refine.correct_failed",
+                f"流式文本热词纠正失败，保持原文：{exc}",
+                level="WARNING",
+                error=str(exc),
+                source=source,
+            )
+            return text
 
     # ------------------------------------------------------------------
     # 收尾

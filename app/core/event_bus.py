@@ -35,7 +35,18 @@ from typing import Any, Callable
 
 from pydantic import BaseModel
 
-__all__ = ["Event", "EventBus", "now_ts"]
+__all__ = [
+    "Event",
+    "EventBus",
+    "now_ts",
+    "DialoguePartial",
+    "DialogueSentence",
+    "DialogueSessionStarted",
+    "DialogueSentenceLogged",
+    "DialogueQuestionMarked",
+    "ProjectModeStarted",
+    "ProjectModeStopped",
+]
 
 
 class Event(BaseModel):
@@ -127,3 +138,67 @@ class EventBus:
 def now_ts() -> float:
     """返回当前时间戳（秒，浮点），供构造事件时填 ``ts``。"""
     return time.time()
+
+# --------------------------------------------------------------------------
+# 对话日志与项目模式事件
+#
+# 事件类型名见各子类的 ``type`` 字段；``role`` 取「我」与「面试官」，
+# 见 :mod:`app.dialogue.dialogue_log` 与 :mod:`app.audio.project_mode`。
+# --------------------------------------------------------------------------
+
+
+class DialoguePartial(Event):
+    """``dialogue.partial``：一路识别出的当前句累计文本。
+
+    ``text`` 是这一路当前句的累计文本（不是增量），界面收到后替换显示
+    当前那一行，句子落库后该行清空。
+    """
+
+    type: str = "dialogue.partial"
+    role: str = ""
+    text: str = ""
+
+
+class DialogueSentence(Event):
+    """``dialogue.sentence``：一路识别出的完整句子，已按句落库。"""
+
+    type: str = "dialogue.sentence"
+    role: str = ""
+    text: str = ""
+
+
+class DialogueSessionStarted(Event):
+    """``dialogue.session_started``：新的对话会话已开始。"""
+
+    type: str = "dialogue.session_started"
+    session_id: str = ""
+
+
+class DialogueSentenceLogged(Event):
+    """``dialogue.sentence_logged``：一个句子已写入对话日志文件。"""
+
+    type: str = "dialogue.sentence_logged"
+    role: str = ""
+    text: str = ""
+    session_id: str = ""
+
+
+class DialogueQuestionMarked(Event):
+    """``dialogue.question_marked``：截取窗口内的面试官句子已标记为问题。"""
+
+    type: str = "dialogue.question_marked"
+    text: str = ""
+
+
+class ProjectModeStarted(Event):
+    """``project_mode.started``：项目模式双流转写已开始。"""
+
+    type: str = "project_mode.started"
+    session_id: str = ""
+
+
+class ProjectModeStopped(Event):
+    """``project_mode.stopped``：项目模式双流转写已停止。"""
+
+    type: str = "project_mode.stopped"
+    session_id: str = ""

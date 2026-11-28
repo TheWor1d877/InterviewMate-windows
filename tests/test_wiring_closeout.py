@@ -2,7 +2,8 @@
 
 覆盖四处最后一根线：
 
-- 界面按 F8 触发装配层注入的语音采集回调，回调没接上时安静地什么都不做，
+- F8 不在界面绑定：按住说话由 AHK 全局热键经 socket 处理，界面按了安静地什么都不做，
+  socket 的按住动作 ``voice-start``/``voice-stop`` 与主进程状态走同一条路，
   见《5-语音输入与流式ASR》F8 交互一节；
 - 检索来源的「存」与「显示」拆开：检索完成时来源静默存下，浮层不自动弹，
   按 F3 才弹，见《6-Dify检索与项目知识》检索来源展示一节；
@@ -24,6 +25,7 @@ from typing import Any
 import app.main
 from app.audio.funasr_engine import FunASREngine
 from app.core.question_manager import QuestionManager
+from app.runtime.socket_protocol import Request
 from app.ui.app import InterviewMateApp
 from app.ui.panels.rag_sources import RagSourcesPanel
 from app.ui.panels.voice_text import VoiceTextPanel
@@ -99,7 +101,7 @@ class FakeApp:
         self.questions: list[str] = []
         self.hints: list[str] = []
         self.statuses: list[dict] = []
-        self.voice_toggle: Any = None
+
         self.manager: Any = None
 
     def show_error(self, code: str, detail: str) -> None:
@@ -116,9 +118,6 @@ class FakeApp:
     def attach_manager(self, manager: Any) -> None:
         self.manager = manager
 
-    def attach_voice_toggle(self, callback: Any) -> None:
-        """记录装配层挂上来的语音采集回调。"""
-        self.voice_toggle = callback
 
     def store_rag_sources(self, entries: list[dict]) -> None:
         """只存来源，不弹浮层。"""
@@ -396,47 +395,11 @@ def _make_manager(
 
 
 # ----------------------------------------------------------------------
-# 界面 F8 接真采集，见《5-语音输入与流式ASR》F8 交互一节
+# F8 不在界面绑定，按住说话由 AHK 全局热键经 socket 处理，
+# 见《5-语音输入与流式ASR》F8 交互一节
 # ----------------------------------------------------------------------
-async def test_f8_calls_the_injected_voice_callback() -> None:
-    """界面按 F8 触发装配层注入的语音采集回调。"""
-    calls: list[str] = []
-    app = InterviewMateApp(
-        config=make_config(),
-        voice_toggle=lambda: calls.append("toggle"),
-    )
-
-    async with app.run_test(size=(WIDE_WIDTH, 30)) as pilot:
-        await pilot.pause()
-        await pilot.press("f8")
-        await pilot.pause()
-
-    assert calls == ["toggle"]
-
-
-async def test_f8_awaits_the_async_voice_callback() -> None:
-    """回调是协程时界面把它放到后台跑完。"""
-    calls: list[str] = []
-    called = asyncio.Event()
-
-    async def _toggle() -> None:
-        """假的语音采集回调。"""
-        calls.append("toggle")
-        called.set()
-
-    app = InterviewMateApp(config=make_config(), voice_toggle=_toggle)
-
-    async with app.run_test(size=(WIDE_WIDTH, 30)) as pilot:
-        await pilot.pause()
-        await pilot.press("f8")
-        await pilot.pause()
-        await asyncio.wait_for(called.wait(), timeout=5)
-
-    assert calls == ["toggle"]
-
-
-async def test_f8_without_callback_does_nothing() -> None:
-    """回调没接上时按 F8 只记日志，不抛异常。"""
+async def test_f8_press_is_ignored_by_the_ui() -> None:
+    """F8 不在界面绑定，按了不触发任何语音动作，应用照常运行。"""
     app = InterviewMateApp(config=make_config())
 
     async with app.run_test(size=(WIDE_WIDTH, 30)) as pilot:
@@ -446,32 +409,40 @@ async def test_f8_without_callback_does_nothing() -> None:
         assert app.is_running
 
 
-async def test_assembled_voice_wires_f8_to_the_socket_voice_toggle() -> None:
-    """装配后界面按 F8 与 socket 的 voice-toggle 走同一条路。"""
+async def test_assembled_voice_wires_hold_actions_to_the_state() -> None:
+    """装配后 socket 的按住动作与主进程状态走同一条路。"""
     ui = FakeApp()
     manager = FakeManager()
     state = app.main.MainState()
     capture = FakeCapture()
+    engine = FakeEngine()
     voice = app.main.assemble_voice(
         make_config(),
         ui,
         manager,
         state=state,
-        engine=FakeEngine(),
+        engine=engine,
         factory=lambda source: capture,
     )
     state.set_voice_chain(voice)
+    handlers = app.main.build_handlers(state)
 
-    # 界面拿到的就是主进程状态上那个 voice-toggle 实现
-    assert ui.voice_toggle == state.toggle_voice_capture
-
-    await ui.voice_toggle()
-
+    # F8 按下：voice-start 动作开始采集
+    started = await handlers["voice-start"](
+        Request(action="voice-start", request_id="req-1")
+    )
+    assert started["result"] == "started"
     assert capture.started == 1
     assert state.audio_on is True
 
-    await state.toggle_voice_capture()
+    # 等识别真的喂进第一块，松开冲刷时才有识别流可冲
+    await engine.fed.wait()
 
+    # F8 松开：voice-stop 动作停止采集并冲刷最终文本
+    stopped = await handlers["voice-stop"](
+        Request(action="voice-stop", request_id="req-2")
+    )
+    assert stopped["result"] == "stopped"
     assert capture.stopped == 1
     assert state.audio_on is False
 
@@ -748,9 +719,11 @@ async def test_final_voice_text_is_shown_as_the_question() -> None:
 
 
 async def test_real_voice_chain_shows_the_question_and_clears_the_line() -> None:
-    """真实链路：F8 开始 → 部分结果 → F8 停止。
+    """真实链路：voice-start 开始 → 部分结果 → voice-stop 停止。
 
     右栏顶部出现最终题面，临时识别文字行在停止后是空的。
+    F8 的按下与松开由 AHK 全局热键经 socket 送到主进程状态上，
+    这里直接调状态入口，与按住动作走同一条路。
     """
     ui = InterviewMateApp(config=make_config())
     manager = FakeManager()
@@ -772,16 +745,16 @@ async def test_real_voice_chain_shows_the_question_and_clears_the_line() -> None
         await pilot.pause()
         panel = ui.query_one(VoiceTextPanel)
 
-        # F8 开始采集
-        await pilot.press("f8")
+        # F8 按下（voice-start 动作）：开始采集
+        await state.start_voice_capture()
         await asyncio.wait_for(engine.all_fed.wait(), timeout=5)
         await pilot.pause()
 
         # 临时文字行显示的是累计文本
         assert panel.text == "欢迎大家来"
 
-        # F8 停止采集
-        await pilot.press("f8")
+        # F8 松开（voice-stop 动作）：停止采集
+        await state.stop_voice_capture()
         await asyncio.wait_for(manager.submitted.wait(), timeout=5)
         await pilot.pause()
 
@@ -815,10 +788,11 @@ async def test_real_voice_chain_reports_empty_result_in_the_status_bar() -> None
     async with ui.run_test(size=(WIDE_WIDTH, 30)) as pilot:
         await pilot.pause()
 
-        # F8 开始采集，再按一次停止，这一段没识别到内容
-        await pilot.press("f8")
+        # F8 按下开始（voice-start 动作），松开停止（voice-stop 动作），
+        # 这一段没识别到内容
+        await state.start_voice_capture()
         await asyncio.wait_for(engine.fed.wait(), timeout=5)
-        await pilot.press("f8")
+        await state.stop_voice_capture()
         await asyncio.wait_for(capture.stopped_event.wait(), timeout=5)
 
         hint = await _wait_for_hint(ui, "识别失败")
@@ -852,9 +826,9 @@ async def test_real_voice_chain_has_no_failure_hint_when_text_is_recognized() ->
     async with ui.run_test(size=(WIDE_WIDTH, 30)) as pilot:
         await pilot.pause()
 
-        await pilot.press("f8")
+        await state.start_voice_capture()
         await asyncio.wait_for(engine.fed.wait(), timeout=5)
-        await pilot.press("f8")
+        await state.stop_voice_capture()
         await asyncio.wait_for(manager.submitted.wait(), timeout=5)
         await pilot.pause()
 

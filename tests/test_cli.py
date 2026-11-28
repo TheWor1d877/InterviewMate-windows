@@ -2,7 +2,7 @@
 
 覆盖《2-骨架与配置》命令行入口一节的子命令、退出码表与验收一节：
 参数错误退出码 2、主进程没运行时 ``status`` 的说明、``hotkey`` 的
-``ok: false`` 与 ``E_SOCKET``、缺 ``DEEPSEEK_API_KEY`` 的退出码 3、
+``ok: false`` 与 ``E_SOCKET``、缺 ``MODEL_API_KEY`` 的退出码 3、
 退役模型名的配置错误、``test`` 的逐项自检。
 
 测试不真起界面进程，也不连真实服务：socket 侧用假响应替身，
@@ -25,15 +25,16 @@ import app.cli
 import app.config
 import app.main
 import app.runtime.socket_client
+from app.audio.loopback_test import LoopbackTestResult
 from app.cli import main as cli_main
-from app.core.exceptions import SocketError
+from app.core.exceptions import AsrLoadError, SocketError
 from app.main import EXIT_ARG_ERROR, EXIT_CONFIG_ERROR, EXIT_ERROR, EXIT_OK
 from app.platform.types import AudioDevice
 from app.runtime.socket_protocol import ACTIONS, Request, Response
 from app.utils.timing import default_recorder, reset_default_recorder
 
 # 会影响配置结果的环境变量，测试里统一清掉
-_OVERRIDE_ENV = ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL")
+_OVERRIDE_ENV = ("MODEL_API_KEY", "MODEL_BASE_URL", "MODEL_NAME")
 
 
 @pytest.fixture(autouse=True)
@@ -166,7 +167,7 @@ def test_status_with_running_main_process(
                 "audio": "off",
                 "asr": "idle",
                 "dify": "offline",
-                "deepseek": "idle",
+                "model": "idle",
                 "ttft": None,
                 "pid": 4242,
             },
@@ -180,7 +181,7 @@ def test_status_with_running_main_process(
     assert "Audio: off" in out
     assert "ASR: idle" in out
     assert "Dify: offline" in out
-    assert "DeepSeek: idle" in out
+    assert "Model: idle" in out
     assert "TTFT: -" in out
     # 没有指标样本时不打印指标段
     assert "指标统计" not in out
@@ -202,7 +203,7 @@ def test_status_with_running_main_process_prints_metrics(
                 "audio": "off",
                 "asr": "idle",
                 "dify": "offline",
-                "deepseek": "idle",
+                "model": "idle",
                 "ttft": None,
                 "pid": 4242,
                 "metrics": [
@@ -248,16 +249,27 @@ def test_hotkey_screenshot_without_main_process(
     assert payload["action"] == "screenshot"
 
 
-def test_hotkey_voice_toggle_without_main_process(
-    runtime_paths: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "action",
+    [
+        "voice-toggle",
+        "voice-start",
+        "voice-stop",
+        "project-mode-toggle",
+        "context-view-toggle",
+        "context-clear",
+    ],
+)
+def test_hotkey_actions_without_main_process(
+    runtime_paths: tuple[Path, Path], capsys: pytest.CaptureFixture[str], action: str
 ) -> None:
-    """voice-toggle 同样走 socket，主进程没运行时返回 ok:false。"""
-    assert cli_main(["hotkey", "voice-toggle"]) == EXIT_ERROR
+    """voice 与切换类子动作同样走 socket，主进程没运行时返回 ok:false。"""
+    assert cli_main(["hotkey", action]) == EXIT_ERROR
     out = capsys.readouterr().out
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["ok"] is False
     assert payload["error"] == "E_SOCKET"
-    assert payload["action"] == "voice-toggle"
+    assert payload["action"] == action
 
 
 def test_hotkey_with_running_main_process(
@@ -290,19 +302,19 @@ def test_start_without_api_key_exits_config_error(
     runtime_paths: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """providers.llm=deepseek 时缺 DEEPSEEK_API_KEY，退出码是 3，输出里点名这个变量。"""
+    """providers.llm=openai 时缺 MODEL_API_KEY，退出码是 3，输出里点名这个变量。"""
     path = _write_config(
         tmp_path,
-        providers={
-            "llm": "deepseek",
-            "retrieval": "mock",
-            "asr": "mock",
-            "screenshot": "mock",
-        },
+            providers={
+                "llm": "openai",
+                "retrieval": "mock",
+                "asr": "mock",
+                "screenshot": "mock",
+            },
     )
     assert cli_main(["start", "--config", str(path)]) == EXIT_CONFIG_ERROR
     out = capsys.readouterr().out
-    assert "DEEPSEEK_API_KEY" in out
+    assert "MODEL_API_KEY" in out
 
 
 def test_start_with_mock_provider_ignores_missing_api_key(
@@ -311,12 +323,12 @@ def test_start_with_mock_provider_ignores_missing_api_key(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """providers.llm=mock 时缺 DEEPSEEK_API_KEY 不拦启动，输出里也不提这个变量。"""
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    """providers.llm=mock 时缺 MODEL_API_KEY 不拦启动，输出里也不提这个变量。"""
+    monkeypatch.delenv("MODEL_API_KEY", raising=False)
     monkeypatch.setattr(app.main, "_stdout_isatty", lambda: False)
     assert cli_main(["start", "--config", str(config_path)]) == EXIT_ERROR
     out = capsys.readouterr().out
-    assert "DEEPSEEK_API_KEY" not in out
+    assert "MODEL_API_KEY" not in out
     assert "不是交互式终端" in out
 
 
@@ -326,7 +338,7 @@ def test_start_with_retired_model_exits_config_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """配置里用了退役模型名时退出码是 3，输出里列出被拒绝的名字。"""
-    path = _write_config(tmp_path, deepseek={"model": "deepseek-chat"})
+    path = _write_config(tmp_path, model={"name": "deepseek-chat"})
     assert cli_main(["start", "--config", str(path)]) == EXIT_CONFIG_ERROR
     out = capsys.readouterr().out
     assert "deepseek-chat" in out
@@ -339,7 +351,7 @@ def test_start_in_non_interactive_terminal(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """非交互式终端里不启动界面，退出码 1。"""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-unit-test-not-a-real-key")
+    monkeypatch.setenv("MODEL_API_KEY", "sk-unit-test-not-a-real-key")
     monkeypatch.setattr(app.main, "_stdout_isatty", lambda: False)
     assert cli_main(["start", "--config", str(config_path)]) == EXIT_ERROR
     out = capsys.readouterr().out
@@ -353,7 +365,7 @@ def test_start_clears_stale_pid_of_foreign_process(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """PID 文件里是别的活进程时按残留文件处理，不结束它，start 照常继续。"""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-unit-test-not-a-real-key")
+    monkeypatch.setenv("MODEL_API_KEY", "sk-unit-test-not-a-real-key")
     monkeypatch.setattr(app.main, "_stdout_isatty", lambda: True)
     monkeypatch.setattr(app.main, "is_server_alive", lambda path=None: False)
     monkeypatch.setattr(app.main, "find_app_processes", lambda **kwargs: ())
@@ -403,7 +415,7 @@ def test_start_with_missing_package_exits_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """依赖包缺一个时退出码是 1，输出里报出包名。"""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-unit-test-not-a-real-key")
+    monkeypatch.setenv("MODEL_API_KEY", "sk-unit-test-not-a-real-key")
     monkeypatch.setattr(app.main, "check_dependencies", lambda packages: ["sounddevice"])
     assert cli_main(["start", "--config", str(config_path)]) == EXIT_ERROR
     out = capsys.readouterr().out
@@ -478,7 +490,7 @@ def test_test_command_prints_items(
     assert "音频设备枚举" in out
     assert "截图接口探测" in out
     assert "ASR 加载" in out
-    assert "DeepSeek 探测" in out
+    assert "模型探测" in out
     assert "Dify 探测" in out
     assert "mock" in out
 
@@ -593,6 +605,226 @@ def test_audio_test_failure_reports_audio_error(
 
 
 # ----------------------------------------------------------------------
+# loopback-test
+# ----------------------------------------------------------------------
+def _write_loopback_config(tmp_path: Path) -> Path:
+    """providers.asr=funasr、其余 mock 的配置副本。"""
+    return _write_config(
+        tmp_path,
+        providers={
+            "llm": "mock",
+            "retrieval": "mock",
+            "asr": "funasr",
+            "screenshot": "mock",
+        },
+    )
+
+
+def _loopback_devices() -> list[AudioDevice]:
+    """麦克风 + 默认扬声器的回环 + 非默认回环。"""
+    return [
+        AudioDevice(
+            name="默认麦克风",
+            index=1,
+            is_input=True,
+            is_loopback=False,
+            default_samplerate=48000.0,
+            channels=2,
+            is_default=True,
+        ),
+        AudioDevice(
+            name="扬声器（回环）",
+            index=10000,
+            is_input=True,
+            is_loopback=True,
+            default_samplerate=48000.0,
+            channels=2,
+            is_default=True,
+        ),
+        AudioDevice(
+            name="虚拟声卡（回环）",
+            index=10001,
+            is_input=True,
+            is_loopback=True,
+            default_samplerate=48000.0,
+            channels=2,
+        ),
+    ]
+
+
+def _loopback_result(**overrides: Any) -> LoopbackTestResult:
+    """构造一份链路通过的自检结果，字段可覆盖。"""
+    fields: dict[str, Any] = dict(
+        peak=0.42,
+        rms=0.18,
+        captured_seconds=3.8,
+        played_seconds=3.0,
+        text="解释一下什么是GDS",
+        expected=None,
+        expected_match=None,
+        ok=True,
+        conclusion="回环链路验证通过：系统声音经回环采集后识别出了文本",
+    )
+    fields.update(overrides)
+    return LoopbackTestResult(**fields)
+
+
+def test_loopback_test_reports_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """链路通过时退出码 0，输出电平、识别文本与结论，装配默认扬声器的回环。"""
+    path = _write_loopback_config(tmp_path)
+    monkeypatch.setattr(app.cli, "list_input_devices", _loopback_devices)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run(
+        wav_path: Any, engine: Any, player: Any, recorder: Any, **kwargs: Any
+    ) -> LoopbackTestResult:
+        calls.append(
+            {"wav": str(wav_path), "expected": kwargs.get("expected"), "recorder": recorder}
+        )
+        return _loopback_result(expected=kwargs.get("expected"))
+
+    monkeypatch.setattr(app.cli, "run_loopback_test", fake_run)
+
+    # 不带 wav 参数：用仓库里的默认测试音频
+    assert cli_main(["loopback-test", "--config", str(path)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "电平峰值：0.4200" in out
+    assert "RMS：0.1800" in out
+    assert "识别文本：解释一下什么是GDS" in out
+    assert "结论：回环链路验证通过" in out
+    assert "期望文案：未提供" in out
+    default_wav = app.config.REPO_ROOT / "tests" / "assets" / "asr-test-question.wav"
+    assert calls[0]["wav"] == str(default_wav)
+    assert calls[0]["expected"] is None
+    # 装配的是默认扬声器的回环端点（编号 10000）
+    assert calls[0]["recorder"]._device == 10000
+
+
+def test_loopback_test_not_ok_returns_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """全程静音链路不算通：退出码 1，输出带结论。"""
+    path = _write_loopback_config(tmp_path)
+    monkeypatch.setattr(app.cli, "list_input_devices", _loopback_devices)
+
+    async def fake_run(
+        wav_path: Any, engine: Any, player: Any, recorder: Any, **kwargs: Any
+    ) -> LoopbackTestResult:
+        return _loopback_result(
+            peak=0.0,
+            rms=0.0,
+            text="",
+            ok=False,
+            conclusion="回环链路验证未通过：没有录到明显声音（峰值 0.0000）",
+        )
+
+    monkeypatch.setattr(app.cli, "run_loopback_test", fake_run)
+    assert cli_main(["loopback-test", "--config", str(path)]) == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "结论：回环链路验证未通过" in out
+
+
+def test_loopback_test_missing_wav(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """wav 不存在时退出码 1，报 E_ASR_LOAD。"""
+    path = _write_loopback_config(tmp_path)
+    assert cli_main(
+        ["loopback-test", str(tmp_path / "nope.wav"), "--config", str(path)]
+    ) == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "E_ASR_LOAD" in out
+    assert "wav 文件不存在" in out
+
+
+def test_loopback_test_requires_funasr(
+    config_path: Path,
+    runtime_paths: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """providers.asr=mock 时退出码 1，报 E_ASR_LOAD。"""
+    assert cli_main(["loopback-test", "--config", str(config_path)]) == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "E_ASR_LOAD" in out
+    assert "providers.asr=funasr" in out
+
+
+def test_loopback_test_without_loopback_device(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """本机没有回环设备时退出码 1，报 E_AUDIO_DEVICE。"""
+    path = _write_loopback_config(tmp_path)
+    monkeypatch.setattr(app.cli, "list_input_devices", lambda: [])
+    assert cli_main(["loopback-test", "--config", str(path)]) == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "E_AUDIO_DEVICE" in out
+    assert "系统回环设备" in out
+
+
+def test_loopback_test_engine_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """引擎失败（模型加载失败）时退出码 1，错误码与说明原样输出。"""
+    path = _write_loopback_config(tmp_path)
+    monkeypatch.setattr(app.cli, "list_input_devices", _loopback_devices)
+
+    async def failing_run(*args: Any, **kwargs: Any) -> LoopbackTestResult:
+        raise AsrLoadError("加载 ASR 模型超时（60 秒）")
+
+    monkeypatch.setattr(app.cli, "run_loopback_test", failing_run)
+    assert cli_main(["loopback-test", "--config", str(path)]) == EXIT_ERROR
+    out = capsys.readouterr().out
+    assert "E_ASR_LOAD" in out
+    assert "加载 ASR 模型超时" in out
+
+
+def test_loopback_test_expected_passthrough(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--expected 透传给编排逻辑，一致时输出自动对比结果。"""
+    path = _write_loopback_config(tmp_path)
+    monkeypatch.setattr(app.cli, "list_input_devices", _loopback_devices)
+    calls: list[str | None] = []
+
+    async def fake_run(
+        wav_path: Any, engine: Any, player: Any, recorder: Any, **kwargs: Any
+    ) -> LoopbackTestResult:
+        expected = kwargs.get("expected")
+        calls.append(expected)
+        return _loopback_result(
+            expected=expected, expected_match=True, conclusion="回环链路验证通过"
+        )
+
+    monkeypatch.setattr(app.cli, "run_loopback_test", fake_run)
+    assert cli_main(
+        [
+            "loopback-test",
+            "--config",
+            str(path),
+            "--expected",
+            "解释一下什么是GDS",
+        ]
+    ) == EXIT_OK
+    assert calls == ["解释一下什么是GDS"]
+    out = capsys.readouterr().out
+    assert "自动对比：一致" in out
+
+
+# ----------------------------------------------------------------------
 # 进程装配
 # ----------------------------------------------------------------------
 def test_build_handlers_covers_all_actions() -> None:
@@ -609,7 +841,7 @@ def test_main_state_status_payload() -> None:
     assert payload["audio"] == "off"
     assert payload["asr"] == "idle"
     assert payload["dify"] == "offline"
-    assert payload["deepseek"] == "idle"
+    assert payload["model"] == "idle"
     assert payload["ttft"] is None
     assert payload["pid"] == os.getpid()
     # 没有样本时 metrics 是空列表
@@ -756,12 +988,12 @@ async def test_probe_model_capability_reports_model_for_mock() -> None:
 async def test_probe_model_capability_reports_failure_without_exiting() -> None:
     """能力探测失败只给失败结果与错误码，不影响截图流程。"""
     config = app.config.load_config()
-    config.providers.llm = "deepseek"
+    config.providers.llm = "openai"
 
     result = await app.main.probe_model_capability(_FailingClient(), config)
 
     assert result.ok is False
-    assert result.code == "E_DEEPSEEK_STREAM"
+    assert result.code == "E_MODEL_STREAM"
     assert not hasattr(result, "supports_image")
 
 
@@ -773,12 +1005,12 @@ class _FailingClient:
         raise RuntimeError("连不上模型服务")
 
 
-async def test_warmup_model_failure_sets_deepseek_error(
+async def test_warmup_model_failure_sets_model_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """handle_warmup 探测模型失败时，DEEPSEEK 状态落到 error。"""
+    """handle_warmup 探测模型失败时，MODEL 状态落到 error。"""
     config = _mock_config()
-    config.providers.llm = "deepseek"
+    config.providers.llm = "openai"
     state = app.main.MainState()
     state.attach_config(config)
     state.set_model_client(_FailingClient())
@@ -789,8 +1021,8 @@ async def test_warmup_model_failure_sets_deepseek_error(
     # 状态回调在事件循环里排了一个发布任务，让它跑完
     await asyncio.sleep(0)
 
-    assert payload["deepseek"] == "error"
-    assert state.deepseek_state == "error"
+    assert payload["model"] == "error"
+    assert state.model_state == "error"
 
 
 # ----------------------------------------------------------------------

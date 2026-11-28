@@ -210,16 +210,16 @@ def test_report_error_calls_error_reporter() -> None:
     answer = FakeAnswer()
     dispatcher = EventDispatcher(navigation, answer, lambda code, detail: reported.append((code, detail)))
 
-    dispatcher.report_error("E_DEEPSEEK_STREAM", "流中断")
+    dispatcher.report_error("E_MODEL_STREAM", "流中断")
 
-    assert reported == [("E_DEEPSEEK_STREAM", "流中断")]
+    assert reported == [("E_MODEL_STREAM", "流中断")]
 
 
 def test_report_error_without_reporter_does_not_raise() -> None:
     """没有 error_reporter 时只写日志，不报错。"""
     dispatcher, _, _ = make_dispatcher()
 
-    dispatcher.report_error("E_DEEPSEEK_STREAM", "流中断")
+    dispatcher.report_error("E_MODEL_STREAM", "流中断")
 
 
 def test_new_framework_replaces_declared_sections() -> None:

@@ -14,8 +14,8 @@ from typing import Any, Iterator
 import pytest
 
 from app.core.exceptions import (
-    DeepSeekAuthError,
-    DeepSeekTimeoutError,
+    ModelAuthError,
+    ModelTimeoutError,
     DifyAuthError,
     DifyResponseError,
     DifyTimeoutError,
@@ -82,7 +82,7 @@ def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRec
 async def test_timeout_failure_then_success_retries() -> None:
     """第一次失败第二次成功：会重试，并拿到第二次的结果。"""
     sleeper = _FakeSleep()
-    call = _Sequence(DeepSeekTimeoutError("超时"), "成功结果")
+    call = _Sequence(ModelTimeoutError("超时"), "成功结果")
 
     result = await retry_async(call, policy=RetryPolicy(max_retries=2), sleep=sleeper)
 
@@ -105,10 +105,10 @@ async def test_dify_timeout_error_also_retries() -> None:
 async def test_exhausted_raises_last_exception() -> None:
     """超过最大次数：抛出最后一次的异常，不是第一次的。"""
     sleeper = _FakeSleep()
-    last = DeepSeekTimeoutError("最后一次")
-    call = _Sequence(DeepSeekTimeoutError("第一次"), last)
+    last = ModelTimeoutError("最后一次")
+    call = _Sequence(ModelTimeoutError("第一次"), last)
 
-    with pytest.raises(DeepSeekTimeoutError) as info:
+    with pytest.raises(ModelTimeoutError) as info:
         await retry_async(call, policy=RetryPolicy(max_retries=1), sleep=sleeper)
 
     assert info.value is last
@@ -127,12 +127,12 @@ async def test_auth_error_is_not_retried() -> None:
     assert sleeper.delays == []
 
 
-async def test_deepseek_auth_error_is_not_retried() -> None:
-    """DeepSeek 鉴权异常同样不重试。"""
+async def test_model_auth_error_is_not_retried() -> None:
+    """模型鉴权异常同样不重试。"""
     sleeper = _FakeSleep()
-    call = _Sequence(DeepSeekAuthError("Key 不对"))
+    call = _Sequence(ModelAuthError("Key 不对"))
 
-    with pytest.raises(DeepSeekAuthError):
+    with pytest.raises(ModelAuthError):
         await retry_async(call, policy=RetryPolicy(max_retries=3), sleep=sleeper)
 
     assert call.calls == 1
@@ -170,11 +170,11 @@ async def test_cancelled_error_not_retried_even_with_always_retry_predicate() ->
 async def test_backoff_delays_are_injected_and_not_actually_waited() -> None:
     """退避延迟走注入的 sleep，测试里没有真实等待。"""
     sleeper = _FakeSleep()
-    call = _Sequence(DeepSeekTimeoutError("超时"))
+    call = _Sequence(ModelTimeoutError("超时"))
     policy = RetryPolicy(max_retries=3, initial_delay=0.5, multiplier=2.0)
 
     start = time.perf_counter()
-    with pytest.raises(DeepSeekTimeoutError):
+    with pytest.raises(ModelTimeoutError):
         await retry_async(call, policy=policy, sleep=sleeper)
     elapsed = time.perf_counter() - start
 
@@ -197,9 +197,9 @@ async def test_success_does_not_retry() -> None:
 async def test_zero_max_retries_does_not_retry() -> None:
     """max_retries 为 0 时只试一次。"""
     sleeper = _FakeSleep()
-    call = _Sequence(DeepSeekTimeoutError("超时"))
+    call = _Sequence(ModelTimeoutError("超时"))
 
-    with pytest.raises(DeepSeekTimeoutError):
+    with pytest.raises(ModelTimeoutError):
         await retry_async(call, policy=RetryPolicy(max_retries=0), sleep=sleeper)
 
     assert call.calls == 1
@@ -278,9 +278,9 @@ async def test_result_level_failure_needs_failure_error() -> None:
 async def test_exhausted_log_records_attempts(retry_logs: pytest.LogCaptureFixture) -> None:
     """次数用尽时把试了几次写进日志。"""
     sleeper = _FakeSleep()
-    call = _Sequence(DeepSeekTimeoutError("超时"))
+    call = _Sequence(ModelTimeoutError("超时"))
 
-    with pytest.raises(DeepSeekTimeoutError):
+    with pytest.raises(ModelTimeoutError):
         await retry_async(
             call,
             policy=RetryPolicy(max_retries=2),
@@ -314,17 +314,17 @@ async def test_not_retryable_is_logged(retry_logs: pytest.LogCaptureFixture) -> 
 def test_default_is_retryable_covers_timeout_and_auth() -> None:
     """默认谓词：超时可重试，鉴权不可重试。"""
     assert default_is_retryable(DifyTimeoutError("超时")) is True
-    assert default_is_retryable(DeepSeekTimeoutError("超时")) is True
+    assert default_is_retryable(ModelTimeoutError("超时")) is True
     assert default_is_retryable(DifyAuthError("Key 不对")) is False
-    assert default_is_retryable(DeepSeekAuthError("Key 不对")) is False
+    assert default_is_retryable(ModelAuthError("Key 不对")) is False
     assert default_is_retryable(DifyResponseError("响应异常")) is False
     assert default_is_retryable(ValueError("其它")) is False
 
 
 def test_exception_type_groups_match_docs() -> None:
     """异常分组与《2-骨架与配置》错误码一节对得上。"""
-    assert RETRYABLE_EXCEPTIONS == (DifyTimeoutError, DeepSeekTimeoutError)
-    assert NON_RETRYABLE_EXCEPTIONS == (DifyAuthError, DeepSeekAuthError)
+    assert RETRYABLE_EXCEPTIONS == (DifyTimeoutError, ModelTimeoutError)
+    assert NON_RETRYABLE_EXCEPTIONS == (DifyAuthError, ModelAuthError)
 
 
 def test_policy_caps_delay_at_max_delay() -> None:

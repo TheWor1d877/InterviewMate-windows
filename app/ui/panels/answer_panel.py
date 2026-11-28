@@ -390,6 +390,8 @@ class AnswerPanel(Static):
         """把解题步骤拼成代码上方的思路块。
 
         每步一行「序号. 标题：一句话思路」，与左侧阶梯一致。
+        步骤行是正文内容，超宽时交给渲染层按面板宽度软换行，不截断；
+        只有「思路」小标题按单行截断。
         """
         block = Text()
         header = Text(APPROACH_TITLE, style="bold")
@@ -401,7 +403,6 @@ class AnswerPanel(Static):
             hint = _step_field(step, "hint")
             if hint:
                 line.append(f"：{hint}", style="dim")
-            self._fit(line)
             block.append("\n")
             block.append_text(line)
         return block
@@ -413,12 +414,15 @@ class AnswerPanel(Static):
         return line
 
     def _build_syntax(self) -> Syntax:
-        """按当前高亮语言渲染代码，认不出的语言按 C++ 处理。"""
+        """按当前高亮语言渲染代码，认不出的语言按 C++ 处理。
+
+        代码行按面板宽度软换行，超长行不截断、不丢失内容。
+        """
         return Syntax(
             self.code_text,
             self._code_language,
             background_color="default",
-            word_wrap=False,
+            word_wrap=True,
         )
 
     def _complete_line(self) -> Text:

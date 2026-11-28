@@ -13,11 +13,12 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
 from app.config import AppConfig, load_config
-from app.core.exceptions import DeepSeekAuthError, DeepSeekTimeoutError
+from app.core.exceptions import ModelAuthError, ModelTimeoutError
 from app.core.question_classifier import Classification
 from app.core.question_manager import QuestionManager
 from app.inputs.text_input import build_text_input
@@ -202,6 +203,19 @@ def make_manager(
     return manager, client, parsers, sink
 
 
+async def _wait_request_done(manager: QuestionManager, timeout: float = 2.0) -> None:
+    """等当前请求任务收尾。
+
+    带图提交不等整条流结束（采集与提交链路不能被生成拖住），
+    断言输出前先让后台任务跑完。
+    """
+    deadline = time.monotonic() + timeout
+    while manager.active_request_id is not None:
+        if time.monotonic() >= deadline:
+            raise AssertionError("等待请求任务收尾超时")
+        await asyncio.sleep(0)
+
+
 async def test_submit_empty_text_creates_no_session() -> None:
     """空白文本直接返回，不建会话也不发请求。"""
     manager, client, _parsers, sink = make_manager()
@@ -318,18 +332,18 @@ async def test_each_request_uses_its_own_parser() -> None:
 
 async def test_client_error_reports_error_without_raising() -> None:
     """客户端异常走 report_error，不抛给调用方。"""
-    client = FakeClient(chunks=["片段"], error=DeepSeekAuthError("密钥无效"))
+    client = FakeClient(chunks=["片段"], error=ModelAuthError("密钥无效"))
     manager, _client, _parsers, sink = make_manager(client=client)
     await manager.submit_text(QUESTION_ONE)
-    assert sink.errors == [("E_DEEPSEEK_AUTH", "密钥无效")]
+    assert sink.errors == [("E_MODEL_AUTH", "密钥无效")]
 
 
 async def test_client_timeout_reports_error_without_raising() -> None:
     """超时同样走 report_error。"""
-    client = FakeClient(error=DeepSeekTimeoutError("读取超时"))
+    client = FakeClient(error=ModelTimeoutError("读取超时"))
     manager, _client, _parsers, sink = make_manager(client=client)
     await manager.submit_text(QUESTION_ONE)
-    assert sink.errors == [("E_DEEPSEEK_TIMEOUT", "读取超时")]
+    assert sink.errors == [("E_MODEL_TIMEOUT", "读取超时")]
 
 
 async def test_reanalyze_reuses_same_material() -> None:
@@ -443,10 +457,10 @@ def test_build_text_input_keeps_inner_newlines() -> None:
     assert item.text == "第一行\n第二行"
 
 
-@pytest.mark.parametrize("code", ["E_DEEPSEEK_AUTH", "E_DEEPSEEK_TIMEOUT"])
+@pytest.mark.parametrize("code", ["E_MODEL_AUTH", "E_MODEL_TIMEOUT"])
 async def test_report_error_codes(code: str) -> None:
     """错误码按《2-骨架与配置》错误码一节传。"""
-    errors = {exc.code for exc in (DeepSeekAuthError("a"), DeepSeekTimeoutError("b"))}
+    errors = {exc.code for exc in (ModelAuthError("a"), ModelTimeoutError("b"))}
     assert code in errors
 
 
@@ -458,6 +472,7 @@ async def test_empty_text_with_image_is_a_valid_submit() -> None:
     manager, client, _parsers, _sink = make_manager()
 
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
 
     session = manager.current_session
     assert session is not None
@@ -474,6 +489,7 @@ async def test_image_and_text_go_in_one_message() -> None:
     manager.set_voice_text(VOICE_TEXT)
 
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
 
     assert len(client.multimodal_calls) == 1
     messages, _request_id = client.multimodal_calls[0]
@@ -493,7 +509,9 @@ async def test_two_image_submissions_are_not_deduplicated() -> None:
     manager, client, _parsers, _sink = make_manager()
 
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
 
     assert len(client.multimodal_calls) == 2
     assert client.calls == []
@@ -513,6 +531,7 @@ async def test_image_submit_sends_even_when_voice_text_matches_last_text() -> No
 
     manager.set_voice_text(VOICE_TEXT)
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
 
     assert len(client.multimodal_calls) == 1
     messages, _request_id = client.multimodal_calls[0]
@@ -530,6 +549,7 @@ async def test_text_dedup_still_works_after_an_image_submit() -> None:
     assert len(client.calls) == 1
 
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
     assert len(client.multimodal_calls) == 1
 
     # 同一段文本再提交，被去重拦掉
@@ -543,7 +563,9 @@ async def test_new_image_replaces_the_old_one() -> None:
     new_url = "data:image/png;base64,BBBB"
 
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
     await manager.submit_text("", image_data_url=new_url)
+    await _wait_request_done(manager)
 
     assert len(client.multimodal_calls) == 2
     assert manager.current_session is not None
@@ -556,6 +578,7 @@ async def test_reanalyze_reuses_the_same_image() -> None:
     manager.set_voice_text(VOICE_TEXT)
 
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
     await manager.reanalyze()
 
     assert len(client.multimodal_calls) == 2
@@ -602,12 +625,13 @@ async def test_voice_text_is_stored_and_cleared_with_new_question() -> None:
 
 async def test_multimodal_client_error_does_not_raise() -> None:
     """多模态请求的客户端异常同样不外抛。"""
-    client = FakeClient(chunks=["片段"], error=DeepSeekAuthError("密钥无效"))
+    client = FakeClient(chunks=["片段"], error=ModelAuthError("密钥无效"))
     manager, _client, _parsers, sink = make_manager(client=client)
 
     await manager.submit_text("", image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
 
-    assert sink.errors == [("E_DEEPSEEK_AUTH", "密钥无效")]
+    assert sink.errors == [("E_MODEL_AUTH", "密钥无效")]
 
 
 # ----------------------------------------------------------------------

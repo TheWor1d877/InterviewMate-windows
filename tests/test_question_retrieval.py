@@ -12,6 +12,7 @@ core 层不 import 检索层与界面层的实现类，这里也不用它们的�
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -246,6 +247,19 @@ def make_manager(
     return manager, client, sink
 
 
+async def _wait_request_done(manager: QuestionManager, timeout: float = 2.0) -> None:
+    """等当前请求任务收尾。
+
+    带图提交不等整条流结束（采集与提交链路不能被生成拖住），
+    断言输出前先让后台任务跑完。
+    """
+    deadline = time.monotonic() + timeout
+    while manager.active_request_id is not None:
+        if time.monotonic() >= deadline:
+            raise AssertionError("等待请求任务收尾超时")
+        await asyncio.sleep(0)
+
+
 # ----------------------------------------------------------------------
 # 检索的触发条件与流程，见《6-Dify检索与项目知识》检索的触发条件与检索流程两节
 # ----------------------------------------------------------------------
@@ -289,6 +303,7 @@ async def test_multimodal_request_also_carries_context() -> None:
     )
 
     await manager.submit_text(QUESTION_PROJECT, image_data_url=IMAGE_DATA_URL)
+    await _wait_request_done(manager)
 
     assert retriever.queries == [QUESTION_PROJECT]
     assert multimodal.calls[0][3] == CONTEXT_TEXT

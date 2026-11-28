@@ -1,6 +1,6 @@
 """Prompt 组装的测试。
 
-覆盖《3-文本输入与流式回答》普通问题的 Prompt 一节的回答要求、
+覆盖《3-文本输入与流式回答》普通问题的 Prompt 一节的回答建议、
 输出格式与禁止栏目清单，以及 PromptManager 的题型入口。
 
 另外覆盖《4-截图输入与多模态》多模态请求一节与截图内容作为数据一节：
@@ -70,7 +70,7 @@ _IMAGE_DATA_URL = "data:image/png;base64,AAAA"
 @pytest.fixture
 def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
     """加载仓库默认配置，屏蔽可能存在的环境变量覆盖。"""
-    for name in ("DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
+    for name in ("MODEL_BASE_URL", "MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(app.config, "DEFAULT_ENV_FILE", Path("/nonexistent/.env"))
     return load_config(DEFAULT_CONFIG_PATH)
@@ -88,26 +88,41 @@ def test_prompt_lists_event_types() -> None:
         assert event_type in NORMAL_SYSTEM_PROMPT
 
 
-def test_prompt_states_answer_rules() -> None:
-    """回答要求写在 system 里：层级数、标题宁少勿多、标题跟着题目走。"""
-    assert "2 到 3 层" in NORMAL_SYSTEM_PROMPT
-    assert "宁少勿多" in NORMAL_SYSTEM_PROMPT
+def test_prompt_has_no_hard_numeric_limits() -> None:
+    """旧的硬性数字上限不再出现在 system 里，内容规则以建议表达。"""
+    for phrase in (
+        "400 字",
+        "25 字",
+        "20 字",
+        "4 到 8",
+        "2 到 3 层",
+        "3 到 5 个",
+        "30 个汉字",
+    ):
+        assert phrase not in NORMAL_SYSTEM_PROMPT
+
+
+def test_prompt_states_answer_suggestions() -> None:
+    """回答建议写在 system 里：先结论、完整句子、篇幅随题、标题跟着题目走。"""
+    assert "建议" in NORMAL_SYSTEM_PROMPT
+    assert "先给结论" in NORMAL_SYSTEM_PROMPT
+    assert "主谓宾齐全" in NORMAL_SYSTEM_PROMPT
+    assert "以能口播为准" in NORMAL_SYSTEM_PROMPT
     assert "标题" in NORMAL_SYSTEM_PROMPT
-    assert "关键点" in NORMAL_SYSTEM_PROMPT
 
 
-def test_prompt_caps_total_items_and_leads_with_conclusion() -> None:
-    """要点总数有上限，第一条先给结论。"""
+def test_prompt_leads_with_conclusion_and_prefers_less() -> None:
+    """第一条先给结论，宁可少讲不凑数。"""
     for prompt in (NORMAL_SYSTEM_PROMPT, SCREENSHOT_SYSTEM_PROMPT):
-        assert "3 到 5 个" in prompt
         assert "先给结论" in prompt
+        assert "宁可少讲" in prompt
 
 
-def test_prompt_limits_sentence_length() -> None:
-    """正文规则写在两套 system 里：每句上限，每条一到两句正文。"""
+def test_prompt_prefers_complete_sentences() -> None:
+    """建议用完整句子表达，不写电报体。"""
     for prompt in (NORMAL_SYSTEM_PROMPT, SCREENSHOT_SYSTEM_PROMPT):
-        assert "每句不超过 25 字" in prompt
-        assert "1 到 2 句正文" in prompt
+        assert "主谓宾齐全" in prompt
+        assert "电报体" in prompt
 
 
 def test_prompt_tells_model_to_restore_spoken_question() -> None:
@@ -117,19 +132,19 @@ def test_prompt_tells_model_to_restore_spoken_question() -> None:
         assert "还原" in prompt
 
 
-def test_prompt_allows_question_answer_to_expand_slightly() -> None:
-    """问答题可以比代码题稍微展开，但不出现长段落。"""
+def test_prompt_lets_length_follow_complexity() -> None:
+    """篇幅按题目复杂度决定，以能口播为准，简单题不硬凑。"""
     for prompt in (NORMAL_SYSTEM_PROMPT, SCREENSHOT_SYSTEM_PROMPT):
-        assert "问答题允许比代码题稍微展开" in prompt
-        assert "不得出现长段落" in prompt
+        assert "按题目复杂度决定" in prompt
+        assert "以能口播为准" in prompt
+        assert "不硬凑" in prompt
 
 
 def test_screenshot_prompt_keeps_normal_protocol() -> None:
-    """截图版保留普通版的层级、标题、事件名与禁止栏目。"""
+    """截图版继承普通版的回答建议、事件名与禁止栏目。"""
     for prompt in (NORMAL_SYSTEM_PROMPT, SCREENSHOT_SYSTEM_PROMPT):
-        assert "2 到 3 层" in prompt
-        assert "宁少勿多" in prompt
-        assert "关键点" in prompt
+        assert "先给结论" in prompt
+        assert "口播" in prompt
         for event_type in _EVENT_TYPES:
             assert event_type in prompt
         for column in _FORBIDDEN_COLUMNS:

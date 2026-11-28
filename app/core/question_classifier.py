@@ -8,7 +8,14 @@
 4. 输入含系统设计特征，判为 ``system_design``；
 5. 都命中不了，判为 ``unknown``。
 
-判定只做规则匹配，不调用模型。模型判定由 llm 层实现
+``question_type`` 之外另有一个项目范围维度 ``project_scope``，取值三档：
+
+- ``none``：简答题，不检索；
+- ``mixed``：简答题带项目，检索，输出主体答基础、末尾一小段结合项目；
+- ``full``：项目题，检索，项目视角为主。
+
+模型判定三档；本地规则回退只做两档启发：命中项目类关键词给 ``full``，
+否则给 ``none``。判定只做规则匹配，不调用模型。模型判定由 llm 层实现
 :class:`AsyncQuestionClassifier` 协议，本模块只声明协议、不 import llm 实现。
 """
 
@@ -24,12 +31,16 @@ __all__ = [
     "Classification",
     "AsyncQuestionClassifier",
     "QuestionClassifier",
+    "PROJECT_SCOPES",
     "DEBUGGING_MARKERS",
     "CODE_MARKERS",
     "ALGORITHM_MARKERS",
     "SYSTEM_DESIGN_MARKERS",
 ]
 
+
+# 项目范围维度的合法取值：none 是简答题，mixed 是简答题带项目，full 是项目题
+PROJECT_SCOPES: frozenset[str] = frozenset({"none", "mixed", "full"})
 
 # 报错堆栈与错误信息特征，命中判 debugging
 DEBUGGING_MARKERS: tuple[str, ...] = (
@@ -130,7 +141,9 @@ class Classification:
 
     ``source`` 标明结果来自哪条判定路径：``"llm"`` 是模型判定，
     ``"rules"`` 是本地规则回退；``reason`` 是模型给出的一句话依据，
-    规则判定时留空。前三个字段的顺序不变。
+    规则判定时留空。``project_scope`` 是项目范围维度，取值见
+    :data:`PROJECT_SCOPES`，规则回退只有 none/full 两档。
+    前三个字段的顺序不变。
     """
 
     question_type: str
@@ -138,6 +151,7 @@ class Classification:
     matched_rules: tuple[str, ...]
     reason: str = ""
     source: str = "rules"
+    project_scope: str = "none"
 
 
 class AsyncQuestionClassifier(Protocol):
@@ -157,6 +171,9 @@ def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
 
 class QuestionClassifier:
     """按《3-文本输入与流式回答》的顺序做规则判定。
+
+    ``project_scope`` 是本地规则的两档启发：命中项目类关键词给 ``full``，
+    否则给 ``none``；``mixed`` 只有模型判定才给。
 
     :param force_project_mode: 开启后 ``rag_required`` 恒为 true，
         对应配置里的 ``rag.force_project_mode``。
@@ -182,9 +199,10 @@ class QuestionClassifier:
         raw = text.lower()
         normalized = normalize_text(text)
 
-        # 项目类关键词单独算：命中与否只影响 rag_required，
+        # 项目类关键词单独算：命中与否只影响 rag_required 与 project_scope，
         # 不影响判定顺序里哪种题型先命中，见《3-文本输入与流式回答》题型判定一节
         project_hit = _contains_any(normalized, PROJECT_KEYWORDS)
+        scope = "full" if project_hit else "none"
 
         # 规则 1：代码块、函数签名、报错堆栈
         has_code_block = bool(_CODE_FENCE_PATTERN.search(raw)) or _contains_any(
@@ -202,12 +220,14 @@ class QuestionClassifier:
                 question_type="debugging",
                 rag_required=self._rag_required(project_hit=project_hit),
                 matched_rules=matched,
+                project_scope=scope,
             )
         if has_code_block or has_signature:
             return Classification(
                 question_type="coding",
                 rag_required=self._rag_required(project_hit=project_hit),
                 matched_rules=("coding_block",),
+                project_scope=scope,
             )
 
         # 规则 2：项目类关键词
@@ -216,6 +236,7 @@ class QuestionClassifier:
                 question_type="project",
                 rag_required=self._rag_required(project_hit=True),
                 matched_rules=("project_keyword",),
+                project_scope="full",
             )
 
         # 规则 3：算法题特征
@@ -224,6 +245,7 @@ class QuestionClassifier:
                 question_type="coding",
                 rag_required=self._rag_required(project_hit=project_hit),
                 matched_rules=("algorithm_feature",),
+                project_scope=scope,
             )
 
         # 规则 4：系统设计特征
@@ -232,6 +254,7 @@ class QuestionClassifier:
                 question_type="system_design",
                 rag_required=self._rag_required(project_hit=project_hit),
                 matched_rules=("system_design_feature",),
+                project_scope=scope,
             )
 
         # 规则 5：都命中不了
@@ -239,6 +262,7 @@ class QuestionClassifier:
             question_type="unknown",
             rag_required=self._rag_required(project_hit=project_hit),
             matched_rules=("unknown_fallback",),
+            project_scope=scope,
         )
 
     def _rag_required(self, *, project_hit: bool) -> bool:

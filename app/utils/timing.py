@@ -51,7 +51,7 @@ class MetricSample:
 
     :param name: 指标名，取值在 :data:`METRIC_NAMES` 里。
     :param value_ms: 耗时毫秒值，非负有限数。
-    :param source: 来源，例如 ``mock``、``dify``、``deepseek``。
+    :param source: 来源，例如 ``mock``、``dify``、``openai``。
     :param ts: 记录时刻的 Unix 时间戳（秒）。
     """
 

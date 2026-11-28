@@ -1,6 +1,7 @@
 """socket 事件转内部动作。
 
-桌面快捷键（``interviewmate.cmd hotkey voice-toggle``）通过 socket 把动作送给主进程，
+桌面快捷键（``scripts/windows/hotkeys.ahk`` 的 AHK 脚本与
+``interviewmate.cmd hotkey <动作>``）通过 socket 把动作送给主进程，
 主进程这边把协议里的 action 映射到内部动作处理器，见《8-集成与验收》全局快捷键一节
 与《2-骨架与配置》进程通信一节。
 
@@ -8,8 +9,13 @@ action 与内部动作的对应：
 
 | 协议 action | 内部动作 | 行为 |
 |---|---|---|
-| ``voice-toggle`` | ``voice_toggle`` | 切换语音采集状态 |
+| ``voice-toggle`` | ``voice_toggle`` | 切换语音采集状态，向后兼容，CLI 手动调用仍可用 |
+| ``voice-start`` | ``voice_start`` | 按住开始：开始语音采集，已在采集时忽略 |
+| ``voice-stop`` | ``voice_stop`` | 按住停止：停止采集并冲刷最终文本提交，没在采集时忽略 |
 | ``screenshot`` | ``screenshot`` | 触发一次截图 |
+| ``project-mode-toggle`` | ``project_mode_toggle`` | 切换项目模式，可能触发模型懒加载 |
+| ``context-view-toggle`` | ``context_view_toggle`` | 切换上下文视图显示/切回 |
+| ``context-clear`` | ``context_clear`` | 清空上下文，重开一轮 |
 | ``stop`` | ``stop`` | 只停语音采集并请求主进程退出，不取消在跑的模型请求 |
 | ``status`` | ``status`` | 返回当前状态 |
 | ``warmup`` | ``warmup`` | 触发预热 |
@@ -32,7 +38,12 @@ from app.utils.logger import log_event
 
 __all__ = [
     "ACTION_VOICE_TOGGLE",
+    "ACTION_VOICE_START",
+    "ACTION_VOICE_STOP",
     "ACTION_SCREENSHOT",
+    "ACTION_PROJECT_MODE_TOGGLE",
+    "ACTION_CONTEXT_VIEW_TOGGLE",
+    "ACTION_CONTEXT_CLEAR",
     "ACTION_STOP",
     "ACTION_STATUS",
     "ACTION_WARMUP",
@@ -47,7 +58,12 @@ __all__ = [
 
 # 内部动作名，处理器按这些名字注册
 ACTION_VOICE_TOGGLE: str = "voice_toggle"
+ACTION_VOICE_START: str = "voice_start"
+ACTION_VOICE_STOP: str = "voice_stop"
 ACTION_SCREENSHOT: str = "screenshot"
+ACTION_PROJECT_MODE_TOGGLE: str = "project_mode_toggle"
+ACTION_CONTEXT_VIEW_TOGGLE: str = "context_view_toggle"
+ACTION_CONTEXT_CLEAR: str = "context_clear"
 ACTION_STOP: str = "stop"
 ACTION_STATUS: str = "status"
 ACTION_WARMUP: str = "warmup"
@@ -55,7 +71,12 @@ ACTION_WARMUP: str = "warmup"
 # 协议 action 到内部动作的映射，与《2-骨架与配置》进程通信一节的 action 表一致
 ACTION_TO_INTERNAL: dict[str, str] = {
     "voice-toggle": ACTION_VOICE_TOGGLE,
+    "voice-start": ACTION_VOICE_START,
+    "voice-stop": ACTION_VOICE_STOP,
     "screenshot": ACTION_SCREENSHOT,
+    "project-mode-toggle": ACTION_PROJECT_MODE_TOGGLE,
+    "context-view-toggle": ACTION_CONTEXT_VIEW_TOGGLE,
+    "context-clear": ACTION_CONTEXT_CLEAR,
     "stop": ACTION_STOP,
     "status": ACTION_STATUS,
     "warmup": ACTION_WARMUP,

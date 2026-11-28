@@ -401,13 +401,13 @@ def test_timed_returns_usable_timer() -> None:
     """timed 返回一个可用的 Timer。"""
     recorder = MetricRecorder()
 
-    timer = timed("total_latency", source="deepseek", recorder=recorder)
+    timer = timed("total_latency", source="openai", recorder=recorder)
 
     assert isinstance(timer, Timer)
     with timer:
         pass
     assert timer.sample is not None
-    assert timer.sample.source == "deepseek"
+    assert timer.sample.source == "openai"
     assert len(recorder.samples("total_latency")) == 1
 
 

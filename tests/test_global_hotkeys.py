@@ -7,11 +7,13 @@
   ``stop()`` 之后到达的按键一律丢弃；
 - 提供者不可用、启动抛异常时 ``start()`` 返回 False 且不向外抛；
 - Windows 平台门面用 :class:`~app.platform.windows.hotkeys.AhkHotkeyProvider`；
-- AutoHotkey v2 脚本：存在、带 v2 声明、F8/F9 全局无条件注册，
-  分别触发 ``hotkey voice-toggle`` 与 ``hotkey screenshot``，
-  且脚本里不写死本机绝对路径；
-- AHK 调用的 CLI 链路：``hotkey voice-toggle|screenshot`` 按动作发到 socket，
-  socket 侧用假实现，不连真实主进程。
+- AutoHotkey v2 脚本：存在、带 v2 声明、五个热键全局无条件注册，
+  F8 按下发 ``hotkey voice-start``、松开发 ``hotkey voice-stop``，
+  F7 发 ``hotkey screenshot``，F9/F10/F11 分别发 ``hotkey
+  project-mode-toggle``、``hotkey context-view-toggle``、
+  ``hotkey context-clear``，且脚本里不写死本机绝对路径；
+- AHK 调用的 CLI 链路：``hotkey voice-start|voice-stop|screenshot`` 按动作
+  发到 socket，socket 侧用假实现，不连真实主进程。
 """
 
 from __future__ import annotations
@@ -324,23 +326,42 @@ def test_ahk_script_exists_and_declares_v2() -> None:
 
 
 def test_ahk_script_registers_hotkeys_globally() -> None:
-    """F8/F9 全局无条件注册。
+    """五个热键全局无条件注册，F8 是按下开始、松开停止的按住语义。
 
-    AHK 可用时界面会短路自己的 F8/F9 绑定，所以脚本不能在前台排除终端，
-    否则「界面短路 + AHK 不接管」会变成两边都不响应。
+    AHK 可用时界面会短路自己的截图绑定（F8/F9/F10/F11 不在界面绑定），
+    所以脚本不能在前台排除终端，否则「界面短路 + AHK 不接管」会变成
+    两边都不响应。
     """
     text = _ahk_script().read_text(encoding="utf-8")
     assert "#HotIf" not in text
-    assert "F8::RunHotkey(\"voice-toggle\")" in text
-    assert "F9::RunHotkey(\"screenshot\")" in text
+    # F8 按下：发 voice-start，再用 KeyWait 等到松开，
+    # 按住期间的键盘自动重复因 #MaxThreadsPerHotkey 1 被丢弃
+    assert "F8::" in text
+    assert 'RunHotkey("voice-start")' in text
+    assert 'KeyWait "F8"' in text
+    # F8 松开：独立的 up 热键发 voice-stop
+    assert "F8 up::" in text
+    assert 'RunHotkey("voice-stop")' in text
+    # F7 截图；F9/F10/F11 分别是项目模式开关、上下文视图切换、清空上下文
+    assert 'F7::RunHotkey("screenshot")' in text
+    assert 'F9::RunHotkey("project-mode-toggle")' in text
+    assert 'F10::RunHotkey("context-view-toggle")' in text
+    assert 'F11::RunHotkey("context-clear")' in text
 
 
 def test_ahk_script_calls_cli_hotkey_actions() -> None:
-    """脚本经 ``python -m app.cli hotkey`` 触发两个动作。"""
+    """脚本经 ``python -m app.cli hotkey`` 触发全部六条动作。"""
     text = _ahk_script().read_text(encoding="utf-8")
     assert "-m app.cli hotkey " in text
-    assert '"voice-toggle"' in text
-    assert '"screenshot"' in text
+    for action in (
+        "voice-start",
+        "voice-stop",
+        "screenshot",
+        "project-mode-toggle",
+        "context-view-toggle",
+        "context-clear",
+    ):
+        assert f'"{action}"' in text
 
 
 def test_ahk_script_has_no_machine_specific_paths() -> None:
@@ -360,7 +381,12 @@ def test_ahk_script_has_no_machine_specific_paths() -> None:
     ("action", "expected"),
     [
         ("voice-toggle", "voice-toggle"),
+        ("voice-start", "voice-start"),
+        ("voice-stop", "voice-stop"),
         ("screenshot", "screenshot"),
+        ("project-mode-toggle", "project-mode-toggle"),
+        ("context-view-toggle", "context-view-toggle"),
+        ("context-clear", "context-clear"),
     ],
 )
 def test_ahk_hotkey_action_reaches_socket(

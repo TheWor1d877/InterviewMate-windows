@@ -19,8 +19,8 @@
 
 不连真实服务
 ------------
-全程用 ``providers`` 四键全 mock 的配置副本，``DEEPSEEK_API_KEY`` 用假值，
-不访问 DeepSeek、Dify、真实 ASR 模型或真实截图服务。
+全程用 ``providers`` 四键全 mock 的配置副本，``MODEL_API_KEY`` 用假值，
+不访问模型服务、Dify、真实 ASR 模型或真实截图服务。
 """
 
 from __future__ import annotations
@@ -81,9 +81,9 @@ PROBE_TOKEN: str = "e2e-probe-token"
 
 # 会影响配置结果的环境变量，子进程里统一清掉再按需注入
 _OVERRIDE_ENV: tuple[str, ...] = (
-    "DEEPSEEK_API_KEY",
-    "DEEPSEEK_BASE_URL",
-    "DEEPSEEK_MODEL",
+    "MODEL_API_KEY",
+    "MODEL_BASE_URL",
+    "MODEL_NAME",
     "DIFY_BASE_URL",
     "DIFY_DATASET_ID",
     "DIFY_DATASET_API_KEY",
@@ -144,7 +144,7 @@ if os.environ.get("IM_TEST_LOG_PROBE") == "1":
         "e2e.log_probe",
         "Authorization: Bearer " + os.environ.get("IM_TEST_PROBE_TOKEN", ""),
         level="INFO",
-        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        api_key=os.environ.get("MODEL_API_KEY", ""),
     )
 
 module_name = os.environ["IM_TEST_MODULE"]
@@ -181,11 +181,11 @@ def _write_config(dest: Path, **sections: Any) -> Path:
 
 
 def _write_config_with_model(dest: Path, model: str) -> Path:
-    """写一份配置副本，只把 ``deepseek.model`` 换成给定值。"""
+    """写一份配置副本，只把 ``model.name`` 换成给定值。"""
     data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
-    deepseek = dict(data["deepseek"])
-    deepseek["model"] = model
-    data["deepseek"] = deepseek
+    section = dict(data["model"])
+    section["name"] = model
+    data["model"] = section
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(
         yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
@@ -241,7 +241,7 @@ class _Runtime:
         env.pop("IM_TEST_LOG_PROBE", None)
         env.pop("IM_TEST_PROBE_TOKEN", None)
         if api_key is not None:
-            env["DEEPSEEK_API_KEY"] = api_key
+            env["MODEL_API_KEY"] = api_key
         env["IM_TEST_RUNTIME_DIR"] = str(self.root)
         env["IM_TEST_SOCKET_PATH"] = str(self.socket_path)
         env["IM_TEST_PID_PATH"] = str(self.pid_path)
@@ -336,32 +336,32 @@ def config_path(tmp_path: Path) -> Path:
 def test_start_without_api_key_exits_config_error(
     runtime: _Runtime, tmp_path: Path
 ) -> None:
-    """providers.llm=deepseek 时缺 DEEPSEEK_API_KEY，start 以退出码 3 结束，输出点名这个变量。"""
-    config = _write_config_with_llm(tmp_path / "deepseek.yaml", "deepseek")
+    """providers.llm=openai 时缺 MODEL_API_KEY，start 以退出码 3 结束，输出点名这个变量。"""
+    config = _write_config_with_llm(tmp_path / "openai.yaml", "openai")
     code, out, _err = _run_cli(
         _cli_args(runtime, config, "start"), runtime, api_key=None
     )
     assert code == EXIT_CONFIG_ERROR
-    assert "DEEPSEEK_API_KEY" in out
+    assert "MODEL_API_KEY" in out
 
 
 def test_start_with_mock_provider_ignores_missing_api_key(
     runtime: _Runtime, config_path: Path
 ) -> None:
-    """providers.llm=mock 时缺 DEEPSEEK_API_KEY 不拦启动，也不提这个变量。"""
+    """providers.llm=mock 时缺 MODEL_API_KEY 不拦启动，也不提这个变量。"""
     code, out, _err = _run_cli(
         _cli_args(runtime, config_path, "start"), runtime, api_key=None
     )
     # 不是交互式终端，界面起不来，但已经走过必填变量那一步
     assert code == EXIT_ERROR
-    assert "DEEPSEEK_API_KEY" not in out
+    assert "MODEL_API_KEY" not in out
     assert "不是交互式终端" in out
 
 
 def test_start_with_retired_model_exits_config_error(
     runtime: _Runtime, tmp_path: Path
 ) -> None:
-    """deepseek.model 用了退役模型名时 start 以退出码 3 结束，输出列出被拒绝的名字。"""
+    """model.name 用了退役模型名时 start 以退出码 3 结束，输出列出被拒绝的名字。"""
     config = _write_config_with_model(tmp_path / "retired.yaml", "deepseek-chat")
     code, out, _err = _run_cli(_cli_args(runtime, config, "start"), runtime)
     assert code == EXIT_CONFIG_ERROR
@@ -427,12 +427,12 @@ def test_test_command_prints_self_check_items(
         "音频设备枚举",
         "截图接口探测",
         "ASR 加载",
-        "DeepSeek 探测",
+        "模型探测",
         "Dify 探测",
     ):
         assert item in out, f"自检输出里少了 {item}"
     assert "[mock] ASR 加载" in out
-    assert "[mock] DeepSeek 探测" in out
+    assert "[mock] 模型探测" in out
     assert "[mock] Dify 探测" in out
 
 
@@ -469,7 +469,7 @@ async def test_ipc_round_trip_over_real_tcp_endpoint(tmp_path: Path) -> None:
         return {"running": "running", "pid": os.getpid()}
 
     def handle_warmup(request: Any) -> dict[str, Any]:
-        return {"asr": "mock", "deepseek": "mock", "dify": "mock"}
+        return {"asr": "mock", "model": "mock", "dify": "mock"}
 
     handlers = {
         "status": handle_status,
@@ -495,7 +495,7 @@ async def test_ipc_round_trip_over_real_tcp_endpoint(tmp_path: Path) -> None:
             send_request, "warmup", socket_path=endpoint
         )
         assert warmup.ok is True
-        assert warmup.payload == {"asr": "mock", "deepseek": "mock", "dify": "mock"}
+        assert warmup.payload == {"asr": "mock", "model": "mock", "dify": "mock"}
 
         # 非法 action 回一行 ok:false 与 E_SOCKET，服务端不崩
         bad = await asyncio.to_thread(
@@ -515,10 +515,10 @@ async def test_ipc_round_trip_over_real_tcp_endpoint(tmp_path: Path) -> None:
 # M2 装配：输入框提交 → mock 流式回答 → 左右两栏渲染
 # ----------------------------------------------------------------------
 def _generation_finished(app: InterviewMateApp) -> bool:
-    """这一轮是不是已经结束：右栏有内容，状态栏 DEEPSEEK 回到 idle。"""
+    """这一轮是不是已经结束：右栏有内容，状态栏 MODEL 回到 idle。"""
     if not app.answer_panel.plain_text().strip():
         return False
-    return app.query_one(StatusBar).status_snapshot()["deepseek"] == "idle"
+    return app.query_one(StatusBar).status_snapshot()["model"] == "idle"
 
 
 async def _wait_for_generation(app: InterviewMateApp, pilot: Any) -> None:
@@ -535,7 +535,7 @@ async def _wait_for_generation(app: InterviewMateApp, pilot: Any) -> None:
 async def test_mock_stream_fills_two_columns_in_running_app(
     config_path: Path,
 ) -> None:
-    """无头启动界面，提交一句话，左栏出框架标题、右栏出表达单元、状态栏 DEEPSEEK 回到 idle。"""
+    """无头启动界面，提交一句话，左栏出框架标题、右栏出表达单元、状态栏 MODEL 回到 idle。"""
     config = load_config(str(config_path))
     app = InterviewMateApp(config=config, bus=EventBus())
     client = MockClient(config)
@@ -556,7 +556,7 @@ async def test_mock_stream_fills_two_columns_in_running_app(
         answer_text = app.answer_panel.plain_text()
         assert "资源管理" in answer_text
         assert "把资源的申请与释放绑定到对象生命周期上" in answer_text
-        assert app.query_one(StatusBar).status_snapshot()["deepseek"] == "idle"
+        assert app.query_one(StatusBar).status_snapshot()["model"] == "idle"
 
 
 # ----------------------------------------------------------------------
@@ -581,7 +581,7 @@ async def test_screenshot_flow_keeps_other_status_fields(
             audio="on",
             asr="ready",
             dify="ready",
-            deepseek="idle",
+            model="idle",
             ttft_ms=120.0,
             hint="生成中",
         )

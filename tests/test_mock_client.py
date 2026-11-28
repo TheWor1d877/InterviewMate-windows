@@ -47,7 +47,7 @@ _LOWERCASE_MARKER_SYSTEM = (
 
 # 普通题的 system：里面只有 model 这个词，没有标记也没有独立的 coding
 _MODEL_SYSTEM = (
-    "你是一个面试回答助手，使用 model deepseek-chat 回答用户提出的普通问题。\n"
+    "你是一个面试回答助手，使用 model glm-chat 回答用户提出的普通问题。\n"
     '{"type": "framework", "mode": "normal", "sections": [{"id": "s1", "title": "标题"}]}\n'
 )
 
@@ -99,7 +99,7 @@ _ACMICPC_QUESTION = (
 @pytest.fixture
 def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
     """加载仓库默认配置，屏蔽可能存在的环境变量覆盖。"""
-    for name in ("DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
+    for name in ("MODEL_BASE_URL", "MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(app.config, "DEFAULT_ENV_FILE", Path("/nonexistent/.env"))
     return load_config(DEFAULT_CONFIG_PATH)

@@ -8,7 +8,7 @@
 | AUDIO | ``off``、``on`` |
 | ASR | ``idle``、``loading``、``ready``、``error`` |
 | DIFY | ``offline``、``ready``、``degraded`` |
-| DEEPSEEK | ``idle``、``connecting``、``streaming``、``error`` |
+| MODEL | ``idle``、``connecting``、``streaming``、``error`` |
 | TTFT | 毫秒数，没有数据时显示 ``-`` |
 
 ``providers`` 是「状态字段名 → 取当前值的可调用对象」的映射，可调用对象
@@ -37,19 +37,19 @@ STATUS_FIELDS: tuple[str, ...] = (
     "audio",
     "asr",
     "dify",
-    "deepseek",
+    "model",
     "ttft",
 )
 
 # 可以从 providers 取值的字段；running 由调用方自己判断，不从 providers 取
-PROVIDER_FIELDS: tuple[str, ...] = ("audio", "asr", "dify", "deepseek", "ttft")
+PROVIDER_FIELDS: tuple[str, ...] = ("audio", "asr", "dify", "model", "ttft")
 
 # 各字段的合法取值，取值表见《2-骨架与配置》命令行入口一节
 _ALLOWED_VALUES: dict[str, frozenset[str]] = {
     "audio": frozenset({"off", "on"}),
     "asr": frozenset({"idle", "loading", "ready", "error"}),
     "dify": frozenset({"offline", "ready", "degraded"}),
-    "deepseek": frozenset({"idle", "connecting", "streaming", "error"}),
+    "model": frozenset({"idle", "connecting", "streaming", "error"}),
 }
 
 # 取值失败时的兜底值
@@ -57,7 +57,7 @@ _FALLBACK_VALUES: dict[str, Any] = {
     "audio": "off",
     "asr": "error",
     "dify": "degraded",
-    "deepseek": "error",
+    "model": "error",
     "ttft": None,
 }
 
@@ -66,7 +66,7 @@ _DEFAULT_VALUES: dict[str, Any] = {
     "audio": "off",
     "asr": "idle",
     "dify": "offline",
-    "deepseek": "idle",
+    "model": "idle",
     "ttft": None,
 }
 
@@ -76,7 +76,7 @@ class HealthStatus:
     """一份运行状态快照。
 
     字段名与《2-骨架与配置》命令行入口一节的状态项对应：
-    ``running``、``audio``、``asr``、``dify``、``deepseek``，
+    ``running``、``audio``、``asr``、``dify``、``model``，
     另有 ``ttft_ms`` 存首字延迟毫秒数，没有数据时为 None。
     """
 
@@ -84,7 +84,7 @@ class HealthStatus:
     audio: str = "off"
     asr: str = "idle"
     dify: str = "offline"
-    deepseek: str = "idle"
+    model: str = "idle"
     ttft_ms: float | None = None
 
 
@@ -92,7 +92,7 @@ class HealthChecker:
     """按 providers 探测运行状态。
 
     :param providers: 状态字段名到取当前值的可调用对象的映射，
-        key 只认 ``audio``、``asr``、``dify``、``deepseek``、``ttft``。
+        key 只认 ``audio``、``asr``、``dify``、``model``、``ttft``。
     """
 
     def __init__(self, providers: Mapping[str, Callable[[], Any]] | None = None) -> None:
@@ -117,7 +117,7 @@ class HealthChecker:
             audio=values["audio"],
             asr=values["asr"],
             dify=values["dify"],
-            deepseek=values["deepseek"],
+            model=values["model"],
             ttft_ms=values["ttft"],
         )
 
@@ -132,7 +132,7 @@ class HealthChecker:
 
         格式见《2-骨架与配置》命令行入口一节的 ``status`` 输出：
         首行是应用名与运行状态，第二行是 PID，空行之后依次是
-        Audio、ASR、Dify、DeepSeek、TTFT。PID 没有数据写 ``-``，
+        Audio、ASR、Dify、Model、TTFT。PID 没有数据写 ``-``，
         TTFT 没有数据写 ``-``，有数据写整数毫秒。末尾不额外加空行。
 
         :param status: 状态快照。
@@ -151,7 +151,7 @@ class HealthChecker:
             f"Audio: {status.audio}",
             f"ASR: {status.asr}",
             f"Dify: {status.dify}",
-            f"DeepSeek: {status.deepseek}",
+            f"Model: {status.model}",
             f"TTFT: {ttft_text}",
         ]
         return "\n".join(lines)

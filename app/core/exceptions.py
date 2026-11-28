@@ -17,9 +17,9 @@ __all__ = [
     "AsrLoadError",
     "AsrDecodeError",
     "ScreenshotError",
-    "DeepSeekAuthError",
-    "DeepSeekTimeoutError",
-    "DeepSeekStreamError",
+    "ModelAuthError",
+    "ModelTimeoutError",
+    "ModelStreamError",
     "DifyAuthError",
     "DifyTimeoutError",
     "DifyResponseError",
@@ -37,9 +37,9 @@ ERROR_CODES: frozenset[str] = frozenset(
         "E_ASR_LOAD",
         "E_ASR_DECODE",
         "E_SCREENSHOT",
-        "E_DEEPSEEK_AUTH",
-        "E_DEEPSEEK_TIMEOUT",
-        "E_DEEPSEEK_STREAM",
+        "E_MODEL_AUTH",
+        "E_MODEL_TIMEOUT",
+        "E_MODEL_STREAM",
         "E_DIFY_AUTH",
         "E_DIFY_TIMEOUT",
         "E_DIFY_RESPONSE",
@@ -100,22 +100,22 @@ class ScreenshotError(InterviewMateError):
     code = "E_SCREENSHOT"
 
 
-class DeepSeekAuthError(InterviewMateError):
-    """DeepSeek API Key 无效，对应 ``E_DEEPSEEK_AUTH``。"""
+class ModelAuthError(InterviewMateError):
+    """模型 API Key 无效，对应 ``E_MODEL_AUTH``。"""
 
-    code = "E_DEEPSEEK_AUTH"
-
-
-class DeepSeekTimeoutError(InterviewMateError):
-    """DeepSeek 请求超时，对应 ``E_DEEPSEEK_TIMEOUT``。"""
-
-    code = "E_DEEPSEEK_TIMEOUT"
+    code = "E_MODEL_AUTH"
 
 
-class DeepSeekStreamError(InterviewMateError):
-    """DeepSeek 流式读取中断，对应 ``E_DEEPSEEK_STREAM``。"""
+class ModelTimeoutError(InterviewMateError):
+    """模型请求超时，对应 ``E_MODEL_TIMEOUT``。"""
 
-    code = "E_DEEPSEEK_STREAM"
+    code = "E_MODEL_TIMEOUT"
+
+
+class ModelStreamError(InterviewMateError):
+    """模型流式读取中断，对应 ``E_MODEL_STREAM``。"""
+
+    code = "E_MODEL_STREAM"
 
 
 class DifyAuthError(InterviewMateError):

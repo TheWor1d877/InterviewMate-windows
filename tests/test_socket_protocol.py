@@ -196,7 +196,18 @@ def test_decode_response_accepts_missing_error_and_payload() -> None:
 
 def test_actions_tuple_matches_frozen_values() -> None:
     """action 取值与《2-骨架与配置》进程通信一节一致。"""
-    assert ACTIONS == ("voice-toggle", "screenshot", "stop", "status", "warmup")
+    assert ACTIONS == (
+        "voice-toggle",
+        "voice-start",
+        "voice-stop",
+        "screenshot",
+        "project-mode-toggle",
+        "context-view-toggle",
+        "context-clear",
+        "stop",
+        "status",
+        "warmup",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -247,6 +258,35 @@ async def test_server_returns_empty_payload_for_none_handler_result(tmp_path: Pa
         await server.stop()
     assert response.ok is True
     assert response.payload == {}
+
+
+async def test_server_acknowledges_fire_and_forget_action_immediately(
+    tmp_path: Path,
+) -> None:
+    """快捷键动作先回执，handler 还在跑时客户端就拿到响应。"""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def handler(request: Request) -> dict[str, object]:
+        started.set()
+        await release.wait()
+        finished.set()
+        return {"captured": True}
+
+    socket_path = tmp_path / "s.sock"
+    server = SocketServer(socket_path=socket_path, handlers={"screenshot": handler})
+    await server.start()
+    try:
+        response = await asyncio.to_thread(send_request, "screenshot", socket_path=socket_path)
+        assert response.ok is True
+        assert response.payload == {"accepted": True, "action": "screenshot"}
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert not finished.is_set()
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=2)
+    finally:
+        await server.stop()
 
 
 async def test_server_unknown_action_returns_e_socket(tmp_path: Path) -> None:
@@ -676,7 +716,7 @@ async def test_collect_returns_provider_values() -> None:
             "audio": lambda: "on",
             "asr": lambda: "ready",
             "dify": lambda: "ready",
-            "deepseek": lambda: "streaming",
+            "model": lambda: "streaming",
             "ttft": lambda: 1234,
         }
     )
@@ -684,7 +724,7 @@ async def test_collect_returns_provider_values() -> None:
     assert status.audio == "on"
     assert status.asr == "ready"
     assert status.dify == "ready"
-    assert status.deepseek == "streaming"
+    assert status.model == "streaming"
     assert status.ttft_ms == 1234.0
 
 
@@ -711,7 +751,7 @@ async def test_collect_falls_back_when_provider_raises() -> None:
             "audio": broken,
             "asr": lambda: "ready",
             "dify": lambda: "ready",
-            "deepseek": lambda: "streaming",
+            "model": lambda: "streaming",
             "ttft": lambda: 88,
         }
     )
@@ -719,7 +759,7 @@ async def test_collect_falls_back_when_provider_raises() -> None:
     assert status.audio == "off"
     assert status.asr == "ready"
     assert status.dify == "ready"
-    assert status.deepseek == "streaming"
+    assert status.model == "streaming"
     assert status.ttft_ms == 88.0
 
 
@@ -730,7 +770,7 @@ async def test_collect_falls_back_on_invalid_values() -> None:
             "audio": lambda: "loud",
             "asr": lambda: "ready",
             "dify": lambda: "unknown",
-            "deepseek": lambda: "streaming",
+            "model": lambda: "streaming",
             "ttft": lambda: "fast",
         }
     )
@@ -738,7 +778,7 @@ async def test_collect_falls_back_on_invalid_values() -> None:
     assert status.audio == "off"
     assert status.asr == "ready"
     assert status.dify == "degraded"
-    assert status.deepseek == "streaming"
+    assert status.model == "streaming"
     assert status.ttft_ms is None
 
 
@@ -757,7 +797,7 @@ async def test_format_status_matches_expected_text() -> None:
         audio="on",
         asr="ready",
         dify="ready",
-        deepseek="streaming",
+        model="streaming",
         ttft_ms=1234.0,
     )
     expected = (
@@ -767,7 +807,7 @@ async def test_format_status_matches_expected_text() -> None:
         "Audio: on\n"
         "ASR: ready\n"
         "Dify: ready\n"
-        "DeepSeek: streaming\n"
+        "Model: streaming\n"
         "TTFT: 1234"
     )
     assert checker.format_status(status, pid=4321) == expected
@@ -783,7 +823,7 @@ async def test_format_status_without_pid_and_ttft() -> None:
         "Audio: off\n"
         "ASR: idle\n"
         "Dify: offline\n"
-        "DeepSeek: idle\n"
+        "Model: idle\n"
         "TTFT: -"
     )
     text = checker.format_status(HealthStatus())

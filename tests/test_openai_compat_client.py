@@ -1,8 +1,8 @@
-"""DeepSeek 客户端与 mock 客户端的测试。
+"""模型客户端与 mock 客户端的测试。
 
 用 httpx.MockTransport 注入传输层，不发真实网络请求。
-覆盖《3-文本输入与流式回答》DeepSeek 客户端一节的流式读取、重试与取消语义，
-以及《接口契约》DeepSeek 文本请求体、多模态请求体、模型能力探测三节的字段。
+覆盖《3-文本输入与流式回答》模型客户端一节的流式读取、重试与取消语义，
+以及《接口契约》模型文本请求体、多模态请求体、模型能力探测三节的字段。
 """
 
 from __future__ import annotations
@@ -19,11 +19,11 @@ import pytest
 import app.config
 from app.config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from app.core.exceptions import (
-    DeepSeekAuthError,
-    DeepSeekStreamError,
-    DeepSeekTimeoutError,
+    ModelAuthError,
+    ModelStreamError,
+    ModelTimeoutError,
 )
-from app.llm.deepseek_client import DeepSeekClient, ModelCapability
+from app.llm.openai_compat_client import OpenAICompatClient, ModelCapability
 from app.llm.mock_client import MockClient
 from app.utils import logger as logger_module
 from app.utils.logger import Redactor
@@ -35,7 +35,7 @@ _EVENT_TYPES = frozenset({"framework", "item", "section_done", "done"})
 @pytest.fixture
 def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
     """加载仓库默认配置，屏蔽可能存在的环境变量覆盖。"""
-    for name in ("DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
+    for name in ("MODEL_BASE_URL", "MODEL_NAME"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(app.config, "DEFAULT_ENV_FILE", Path("/nonexistent/.env"))
     return load_config(DEFAULT_CONFIG_PATH)
@@ -119,9 +119,9 @@ def _make_client(
     config: AppConfig,
     handler: Any,
     api_key: str = "sk-unit-test-key",
-) -> DeepSeekClient:
+) -> OpenAICompatClient:
     """用 MockTransport 建客户端。"""
-    return DeepSeekClient(config, api_key, transport=httpx.MockTransport(handler))
+    return OpenAICompatClient(config, api_key, transport=httpx.MockTransport(handler))
 
 
 async def test_stream_yields_incremental_text(app_config: AppConfig) -> None:
@@ -143,8 +143,8 @@ async def test_stream_yields_incremental_text(app_config: AppConfig) -> None:
     assert chunks == ["你好", "，", "世界"]
     assert len(captured) == 1
     payload = json.loads(captured[0].content)
-    settings = app_config.deepseek
-    assert payload["model"] == settings.model
+    settings = app_config.model
+    assert payload["model"] == settings.name
     assert payload["stream"] is True
     assert payload["thinking"] == {"type": settings.thinking}
     assert payload["reasoning_effort"] == settings.reasoning_effort
@@ -201,7 +201,7 @@ async def test_empty_data_lines_are_skipped(app_config: AppConfig) -> None:
 
 @pytest.mark.parametrize("status", [401, 403])
 async def test_auth_error(app_config: AppConfig, status: int) -> None:
-    """401 与 403 映射到 DeepSeekAuthError，且不重试。"""
+    """401 与 403 映射到 ModelAuthError，且不重试。"""
     calls: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -210,7 +210,7 @@ async def test_auth_error(app_config: AppConfig, status: int) -> None:
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekAuthError):
+        with pytest.raises(ModelAuthError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-4")
             )
@@ -221,14 +221,14 @@ async def test_auth_error(app_config: AppConfig, status: int) -> None:
 
 
 async def test_timeout_error(app_config: AppConfig) -> None:
-    """读超时映射到 DeepSeekTimeoutError。"""
+    """读超时映射到 ModelTimeoutError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("读取超时")
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekTimeoutError):
+        with pytest.raises(ModelTimeoutError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-5")
             )
@@ -238,14 +238,14 @@ async def test_timeout_error(app_config: AppConfig) -> None:
 
 @pytest.mark.parametrize("status", [400, 500, 503])
 async def test_other_status_error(app_config: AppConfig, status: int) -> None:
-    """其它 4xx 与 5xx 映射到 DeepSeekStreamError。"""
+    """其它 4xx 与 5xx 映射到 ModelStreamError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, text="服务异常")
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekStreamError):
+        with pytest.raises(ModelStreamError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-6")
             )
@@ -254,14 +254,14 @@ async def test_other_status_error(app_config: AppConfig, status: int) -> None:
 
 
 async def test_connect_error(app_config: AppConfig) -> None:
-    """连接失败映射到 DeepSeekStreamError。"""
+    """连接失败映射到 ModelStreamError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("连不上")
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekStreamError):
+        with pytest.raises(ModelStreamError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-7")
             )
@@ -349,7 +349,7 @@ async def test_no_retry_after_output(app_config: AppConfig) -> None:
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekStreamError):
+        with pytest.raises(ModelStreamError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-10")
             )
@@ -361,8 +361,8 @@ async def test_no_retry_after_output(app_config: AppConfig) -> None:
 
 async def test_no_retry_when_disabled(app_config: AppConfig) -> None:
     """max_retries 为 0 时不重试。"""
-    settings = app_config.deepseek.model_copy(update={"max_retries": 0})
-    config = app_config.model_copy(update={"deepseek": settings})
+    settings = app_config.model.model_copy(update={"max_retries": 0})
+    config = app_config.model_copy(update={"model": settings})
     calls: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -371,7 +371,7 @@ async def test_no_retry_when_disabled(app_config: AppConfig) -> None:
 
     client = _make_client(config, handler)
     try:
-        with pytest.raises(DeepSeekStreamError):
+        with pytest.raises(ModelStreamError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-11")
             )
@@ -427,7 +427,7 @@ async def test_check_health_parses_capability(app_config: AppConfig) -> None:
             json={
                 "data": [
                     {
-                        "id": app_config.deepseek.model,
+                        "id": app_config.model.name,
                         "input_modalities": ["text", "image"],
                         "context_window": 1048576,
                         "max_output_tokens": 393216,
@@ -443,7 +443,7 @@ async def test_check_health_parses_capability(app_config: AppConfig) -> None:
         await client.aclose()
 
     assert isinstance(capability, ModelCapability)
-    assert capability.model_id == app_config.deepseek.model
+    assert capability.model_id == app_config.model.name
     assert capability.supports_image is True
     assert capability.context_window == 1048576
     assert capability.max_output_tokens == 393216
@@ -458,7 +458,7 @@ async def test_check_health_without_image_modality(app_config: AppConfig) -> Non
             json={
                 "data": [
                     {
-                        "id": app_config.deepseek.model,
+                        "id": app_config.model.name,
                         "input_modalities": ["text"],
                         "context_window": 8192,
                     }
@@ -478,14 +478,14 @@ async def test_check_health_without_image_modality(app_config: AppConfig) -> Non
 
 
 async def test_check_health_auth_error(app_config: AppConfig) -> None:
-    """能力探测遇到 401 映射到 DeepSeekAuthError。"""
+    """能力探测遇到 401 映射到 ModelAuthError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "invalid api key"})
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekAuthError):
+        with pytest.raises(ModelAuthError):
             await client.check_health()
     finally:
         await client.aclose()
@@ -652,7 +652,7 @@ async def test_complete_json_returns_content_and_sends_non_stream(
     assert content == '{"type": "coding"}'
     assert len(captured) == 1
     payload = json.loads(captured[0].content)
-    assert payload["model"] == app_config.deepseek.model
+    assert payload["model"] == app_config.model.name
     assert payload["messages"] == messages
     assert payload["stream"] is False
     assert payload["max_tokens"] == 64
@@ -662,14 +662,14 @@ async def test_complete_json_returns_content_and_sends_non_stream(
 
 @pytest.mark.parametrize("status", [401, 403])
 async def test_complete_json_auth_error(app_config: AppConfig, status: int) -> None:
-    """401 与 403 映射到 DeepSeekAuthError。"""
+    """401 与 403 映射到 ModelAuthError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, json={"error": "invalid api key"})
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekAuthError):
+        with pytest.raises(ModelAuthError):
             await client.complete_json(
                 [{"role": "user", "content": "题面"}],
                 max_tokens=64,
@@ -683,14 +683,14 @@ async def test_complete_json_auth_error(app_config: AppConfig, status: int) -> N
 async def test_complete_json_other_status_error(
     app_config: AppConfig, status: int
 ) -> None:
-    """其它 4xx 与 5xx 映射到 DeepSeekStreamError。"""
+    """其它 4xx 与 5xx 映射到 ModelStreamError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, text="服务异常")
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekStreamError):
+        with pytest.raises(ModelStreamError):
             await client.complete_json(
                 [{"role": "user", "content": "题面"}],
                 max_tokens=64,
@@ -701,14 +701,14 @@ async def test_complete_json_other_status_error(
 
 
 async def test_complete_json_timeout_error(app_config: AppConfig) -> None:
-    """读超时映射到 DeepSeekTimeoutError。"""
+    """读超时映射到 ModelTimeoutError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("读取超时")
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekTimeoutError):
+        with pytest.raises(ModelTimeoutError):
             await client.complete_json(
                 [{"role": "user", "content": "题面"}],
                 max_tokens=64,
@@ -721,14 +721,14 @@ async def test_complete_json_timeout_error(app_config: AppConfig) -> None:
 async def test_complete_json_rejects_malformed_response(
     app_config: AppConfig,
 ) -> None:
-    """响应缺 choices 或 message.content 时抛 DeepSeekStreamError。"""
+    """响应缺 choices 或 message.content 时抛 ModelStreamError。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": []})
 
     client = _make_client(app_config, handler)
     try:
-        with pytest.raises(DeepSeekStreamError):
+        with pytest.raises(ModelStreamError):
             await client.complete_json(
                 [{"role": "user", "content": "题面"}],
                 max_tokens=64,

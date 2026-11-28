@@ -92,9 +92,9 @@ DEFAULT_FRAGMENT_POOL: tuple[MockFragment, ...] = (
     ),
     MockFragment(
         content=(
-            "配置分 app、ui、hotkeys、audio、asr、screenshot、deepseek、rag、coding、"
+            "配置分 app、ui、hotkeys、audio、asr、screenshot、model、rag、coding、"
             "privacy、providers 几段。providers 下四个键各取 mock 或真实实现名："
-            "llm 取 mock 或 deepseek，retrieval 取 mock 或 dify，asr 取 mock 或 funasr，"
+            "llm 取 mock 或 openai，retrieval 取 mock 或 dify，asr 取 mock 或 funasr，"
             "screenshot 取 mock 或 mss。开发期四个键全设 mock。"
         ),
         document_name="《2-骨架与配置》配置结构",
@@ -160,7 +160,7 @@ DEFAULT_FRAGMENT_POOL: tuple[MockFragment, ...] = (
             "代码题另外产出 code_delta 与 code_complete。"
         ),
         document_name="app/llm/stream_parser.py",
-        keywords=("流式", "事件流", "模型", "deepseek", "stream", "解析", "prompt"),
+        keywords=("流式", "事件流", "模型", "openai", "stream", "解析", "prompt"),
         score=0.45,
     ),
     MockFragment(

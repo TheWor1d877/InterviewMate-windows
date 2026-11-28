@@ -10,8 +10,8 @@
 - 五个 socket action 行为不变，未知 action 不崩；
 - 请求任务由受管任务注册表托管：取消会取消任务并通知客户端，
   同一请求标识不重复启动；
-- DeepSeek 客户端：鉴权错误不重试、超时错误会重试、取消原样透传；
-- 状态 payload 的 DEEPSEEK 字段跟着请求生命周期走，ttft 有样本后有值。
+- 模型客户端：鉴权错误不重试、超时错误会重试、取消原样透传；
+- 状态 payload 的 MODEL 字段跟着请求生命周期走，ttft 有样本后有值。
 
 模型客户端、ASR 引擎与截图后端都是假的：不发真实网络请求、
 不加载 FunASR 模型、不开真实音频设备。重试退避注入假函数，测试不等真时间。
@@ -31,14 +31,14 @@ import pytest
 import app.main
 from app.config import AppConfig
 from app.core.exceptions import (
-    DeepSeekAuthError,
-    DeepSeekStreamError,
+    ModelAuthError,
+    ModelStreamError,
 )
 from app.core.question_manager import QuestionManager
 from app.core.task_manager import TaskManager
 from app.inputs.global_command import GlobalCommandDispatcher
 from app.inputs.input_router import InputRouter
-from app.llm.deepseek_client import DeepSeekClient
+from app.llm.openai_compat_client import OpenAICompatClient
 from app.llm.stream_parser import StreamParser
 from app.runtime.socket_protocol import Request
 from app.utils.timing import reset_default_recorder
@@ -176,7 +176,7 @@ class _GatedClient:
     """假模型客户端：先等闸门，再产出增量文本。
 
     用来卡在「请求已发出但还没产出内容」的那一刻，
-    看 DEEPSEEK 字段是不是 connecting。第一段产出后再等一道闸门，
+    看 MODEL 字段是不是 connecting。第一段产出后再等一道闸门，
     流不立刻结束，streaming 那一下才看得见。
     """
 
@@ -731,14 +731,14 @@ async def test_socket_actions_keep_their_behavior() -> None:
 
     # status：返回状态字段
     status_payload = await handlers["status"](Request(action="status"))
-    assert status_payload["deepseek"] == "idle"
+    assert status_payload["model"] == "idle"
     assert status_payload["asr"] == "idle"
     assert status_payload["dify"] == "offline"
     assert "metrics" in status_payload
 
     # warmup：五个 provider 都是 mock 时给 mock 标记
     warmup_payload = await handlers["warmup"](Request(action="warmup"))
-    assert warmup_payload["deepseek"] == "mock"
+    assert warmup_payload["model"] == "mock"
     assert warmup_payload["dify"] == "mock"
 
     # stop：先停采集再退出界面
@@ -880,12 +880,12 @@ async def test_retrieval_task_uses_rag_timeout() -> None:
 
 
 # --------------------------------------------------------------------------
-# DeepSeek 客户端的重试
+# 模型客户端的重试
 # --------------------------------------------------------------------------
 async def test_auth_error_is_not_retried() -> None:
     """鉴权错误不重试：Key 不对时重试多少次都没用。
 
-    见《3-文本输入与流式回答》DeepSeek 客户端一节。
+    见《3-文本输入与流式回答》模型客户端一节。
     """
     calls: list[int] = []
 
@@ -894,14 +894,14 @@ async def test_auth_error_is_not_retried() -> None:
         calls.append(1)
         return httpx.Response(401, text="没有权限")
 
-    client = DeepSeekClient(
+    client = OpenAICompatClient(
         make_config(),
         "sk-unit-test-key",
         transport=httpx.MockTransport(_handler),
         retry_sleep=_no_sleep,
     )
     try:
-        with pytest.raises(DeepSeekAuthError):
+        with pytest.raises(ModelAuthError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-auth")
             )
@@ -914,7 +914,7 @@ async def test_auth_error_is_not_retried() -> None:
 async def test_timeout_error_is_retried() -> None:
     """超时错误会重试：还没收到输出时按 max_retries 重试。
 
-    见《3-文本输入与流式回答》DeepSeek 客户端一节与
+    见《3-文本输入与流式回答》模型客户端一节与
     《8-集成与验收》超时管理一节。
     """
     calls: list[int] = []
@@ -926,7 +926,7 @@ async def test_timeout_error_is_retried() -> None:
             raise httpx.ReadTimeout("读超时")
         return httpx.Response(200, content=_sse("成功"))
 
-    client = DeepSeekClient(
+    client = OpenAICompatClient(
         make_config(),
         "sk-unit-test-key",
         transport=httpx.MockTransport(_handler),
@@ -946,7 +946,7 @@ async def test_timeout_error_is_retried() -> None:
 async def test_stream_error_after_output_is_not_retried() -> None:
     """已经输出部分内容后不重发整个请求。
 
-    见《3-文本输入与流式回答》DeepSeek 客户端一节。
+    见《3-文本输入与流式回答》模型客户端一节。
     """
     calls: list[int] = []
 
@@ -963,14 +963,14 @@ async def test_stream_error_after_output_is_not_retried() -> None:
         calls.append(1)
         return httpx.Response(200, stream=_InterruptStream())
 
-    client = DeepSeekClient(
+    client = OpenAICompatClient(
         make_config(),
         "sk-unit-test-key",
         transport=httpx.MockTransport(_handler),
         retry_sleep=_no_sleep,
     )
     try:
-        with pytest.raises(DeepSeekStreamError):
+        with pytest.raises(ModelStreamError):
             await _collect(
                 client.chat_stream([{"role": "user", "content": "问题"}], "req-broken")
             )
@@ -992,7 +992,7 @@ async def test_cancelled_error_is_passed_through() -> None:
         calls.append(1)
         raise asyncio.CancelledError()
 
-    client = DeepSeekClient(
+    client = OpenAICompatClient(
         make_config(),
         "sk-unit-test-key",
         transport=httpx.MockTransport(_handler),
@@ -1013,35 +1013,35 @@ async def test_cancelled_error_is_passed_through() -> None:
 # 状态字段与性能统计
 # --------------------------------------------------------------------------
 async def test_status_payload_reports_model_state_and_ttft() -> None:
-    """请求期间 DEEPSEEK 字段是 connecting 与 streaming，结束后回到 idle。
+    """请求期间 MODEL 字段是 connecting 与 streaming，结束后回到 idle。
 
     ttft 有样本后有值，没有样本时是 None。
     见《2-骨架与配置》状态字段取值表与《8-集成与验收》性能统计一节。
     """
     client = _GatedClient()
     state = app.main.MainState()
-    manager = _make_manager(client, on_model_state=state.set_deepseek_state)
+    manager = _make_manager(client, on_model_state=state.set_model_state)
 
     submit_task = asyncio.create_task(manager.submit_text("讲讲缓存怎么写"))
     await asyncio.wait_for(client.started.wait(), timeout=5)
 
     # 请求已发出但还没产出内容：connecting
-    assert state.status_payload()["deepseek"] == "connecting"
+    assert state.status_payload()["model"] == "connecting"
     # 没有样本时 ttft 是 None
     assert state.status_payload()["ttft"] is None
 
     client.release.set()
     # 收到第一个片段：streaming
     assert await _wait_until(
-        lambda: state.status_payload()["deepseek"] == "streaming"
+        lambda: state.status_payload()["model"] == "streaming"
     )
     # 流还没结束，状态停在 streaming
-    assert state.status_payload()["deepseek"] == "streaming"
+    assert state.status_payload()["model"] == "streaming"
     client.finish.set()
     await submit_task
 
     # 正常结束回到 idle
-    assert state.status_payload()["deepseek"] == "idle"
+    assert state.status_payload()["model"] == "idle"
     # 有样本后 ttft 有值
     assert state.status_payload()["ttft"] is not None
 

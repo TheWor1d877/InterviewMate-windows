@@ -117,7 +117,7 @@ CodingModeCallback = Callable[[bool], None]
 # 见《2-骨架与配置》状态字段取值表
 ModelStateCallback = Callable[[str], None]
 
-# DEEPSEEK 字段的四个取值，见《2-骨架与配置》状态字段取值表：
+# MODEL 字段的四个取值，见《2-骨架与配置》状态字段取值表：
 # 请求发出前是 connecting，收到第一个流式片段是 streaming，
 # 正常结束回到 idle，出错是 error
 MODEL_STATE_IDLE: str = "idle"
@@ -125,7 +125,7 @@ MODEL_STATE_CONNECTING: str = "connecting"
 MODEL_STATE_STREAMING: str = "streaming"
 MODEL_STATE_ERROR: str = "error"
 
-# 请求任务的总时限余量（秒）：在 ``deepseek.read_timeout`` 之外再加这么多。
+# 请求任务的总时限余量（秒）：在 ``model.read_timeout`` 之外再加这么多。
 # read_timeout 是两次读之间的间隔，整条流可以更久，但不能无限等下去，
 # 见《8-集成与验收》超时管理一节
 _REQUEST_TIMEOUT_MARGIN: float = 60.0
@@ -139,6 +139,18 @@ TTFT_METRIC: str = "ttft"
 FIRST_FRAMEWORK_METRIC: str = "first_framework"
 FIRST_ITEM_METRIC: str = "first_item"
 TOTAL_LATENCY_METRIC: str = "total_latency"
+
+# 项目模式提交问题时，对话日志在 user 消息里的段落标题。
+# 日志正文（``DialogueLog.recent_text()``，含角色标注）拼在这一段下面，
+# 位置在 user 消息靠前、本轮问题之前，见《5-语音输入与流式ASR》项目模式一节
+DIALOGUE_CONTEXT_TITLE: str = "对话上下文"
+
+# 项目模式附加给模型的两句指令：拼在检索内容之后（没检索到内容时
+# 拼在问题之后），提醒模型围绕问题回答、先理解语音转写的问题原意
+DIALOGUE_CONTEXT_NOTES: str = (
+    "检索出来的内容不一定对问题有用，请围绕问题进行回答。"
+    "面试官的问题来自语音转写，可能不精准，先理解他的意思，再以精准的表述回答。"
+)
 
 # 框架事件的事件类型：普通题与代码题共用同一个类型，
 # 见《3-文本输入与流式回答》流式事件协议一节与《7-代码问题模式》流式事件一节
@@ -200,7 +212,7 @@ class _RequestMetrics:
     它表示到中断为止已经发生的耗时。
 
     :param decided_at: 决定发这次请求的时刻，单调时钟秒数。
-    :param source: 来源标记，客户端名，取 ``mock`` 或 ``deepseek``。
+    :param source: 来源标记，客户端名，取 ``mock`` 或 ``openai``。
     :param recorder: 样本落库对象。
     """
 
@@ -412,7 +424,13 @@ class QuestionManager:
             text_length=len(self._voice_text),
         )
 
-    async def submit_text(self, text: str, image_data_url: str | None = None) -> None:
+    async def submit_text(
+        self,
+        text: str,
+        image_data_url: str | None = None,
+        *,
+        dialogue_context: str | None = None,
+    ) -> None:
         """提交一条题面，可以带一张截图。
 
         空文本且没有图直接返回，不建会话也不发请求；同一会话内规范化后重复的
@@ -425,8 +443,15 @@ class QuestionManager:
         策略说要检索时先发起检索，把项目资料拼进请求；检索拿不到结果时
         照样发请求，见《6-Dify检索与项目知识》故障降级一节。
 
+        ``dialogue_context`` 是项目模式的对话日志上下文：
+        ``DialogueLog.recent_text()`` 的全文，含角色标注。给了它时组装
+        请求会把日志拼进 user 消息靠前位置、问题之前，并把两句项目模式
+        指令附加在检索内容之后；不给时（普通模式）行为零变化，
+        见《5-语音输入与流式ASR》项目模式一节。
+
         :param text: 用户输入的题面。
         :param image_data_url: 截图的 data URL，没有截图时传 None。
+        :param dialogue_context: 对话日志上下文，普通模式不传。
         """
         stripped = text.strip()
         has_image = bool(image_data_url)
@@ -466,6 +491,7 @@ class QuestionManager:
             text=effective_text or None,
             image_data_url=image_data_url,
             request_id=str(uuid.uuid4()),
+            dialogue_context=(dialogue_context or "").strip(),
         )
         self._session = session
         if not has_image:
@@ -514,7 +540,15 @@ class QuestionManager:
             session, effective_text, decision.should_retrieve
         )
 
-        await self._start_request(session, classification.question_type, context)
+        # 截图提交不等整条流结束：采集与提交链路不能被生成拖住，
+        # 见《4-截图输入与多模态》截图流程一节。文本提交仍等请求收尾，
+        # 界面靠这个等待收尾状态。
+        await self._start_request(
+            session,
+            classification.question_type,
+            context,
+            wait=not has_image,
+        )
 
     async def reanalyze(self) -> None:
         """用当前会话同一份材料重新生成一次。
@@ -653,6 +687,8 @@ class QuestionManager:
         session: QuestionSession,
         question_type: str,
         context: str | None = None,
+        *,
+        wait: bool = True,
     ) -> None:
         """按请求新建解析器，起一个任务跑这次请求。
 
@@ -661,13 +697,16 @@ class QuestionManager:
         检索耗时单独记在 ``retrieval_latency`` 里，不算进请求发起耗时。
 
         请求任务登记在受管任务注册表里，带一个总时限：
-        时限是 ``deepseek.read_timeout`` 加一分钟余量。``read_timeout``
+        时限是 ``model.read_timeout`` 加一分钟余量。``read_timeout``
         是两次读之间的间隔，整条流本来可以更久，但请求不能放在一个无限等待的
         任务里，所以再宽也留一个上限，见《8-集成与验收》超时管理一节。
 
         :param session: 当前问题会话。
         :param question_type: 题型标识。
         :param context: 检索到的上下文，没有就传 None。
+        :param wait: 是否等这条流跑完再返回。文本提交与重新分析要等，
+            界面靠它收尾；截图提交传假，采集与提交链路不能被生成拖住，
+            见《4-截图输入与多模态》截图流程一节。
         """
         request_id = session.request_id or str(uuid.uuid4())
         self._active_request_id = request_id
@@ -692,6 +731,11 @@ class QuestionManager:
         )
         task = handle.task
         self._request_task = task
+        if not wait:
+            # 提交路径不等待整条流结束：任务已登记在受管任务注册表里，
+            # 结束或取消后由回调清掉当前任务引用，提交动作立即返回
+            task.add_done_callback(self._release_request_task)
+            return
         try:
             await task
         finally:
@@ -700,14 +744,24 @@ class QuestionManager:
             # 清掉已经结束的登记，注册表不一直长
             self._tasks.sweep()
 
+    def _release_request_task(self, task: asyncio.Task[None]) -> None:
+        """截图提交不等流结束时，任务结束后清掉当前任务引用。
+
+        只清自己这一个：之后新提交的任务不能被旧任务的收尾误清掉。
+        """
+        if self._request_task is task:
+            self._request_task = None
+        # 清掉已经结束的登记，注册表不一直长
+        self._tasks.sweep()
+
     def _request_timeout(self) -> float:
         """请求任务的总时限（秒）。
 
-        取 ``deepseek.read_timeout`` 再加一分钟余量：``read_timeout`` 限的是
+        取 ``model.read_timeout`` 再加一分钟余量：``read_timeout`` 限的是
         两次读之间的间隔，整条流可以更久；余量给的是长回答的空间，
         但请求不能放在一个无限等待的任务里，见《8-集成与验收》超时管理一节。
         """
-        return float(self._config.deepseek.read_timeout) + _REQUEST_TIMEOUT_MARGIN
+        return float(self._config.model.read_timeout) + _REQUEST_TIMEOUT_MARGIN
 
     def _build_request_messages(
         self,
@@ -719,10 +773,27 @@ class QuestionManager:
 
         检索上下文是回调的末位参数，没有上下文时按老签名调用，
         兼容不带 context 参数的回调。
+
+        项目模式（会话带对话日志上下文）时在组装前先拼：
+        日志进 user 消息靠前位置、问题之前，两句指令拼在检索内容之后
+        （没检索到内容时拼在问题之后单独成段，检索上下文传 None）。
+        普通模式两步都原样返回，见《5-语音输入与流式ASR》项目模式一节。
         """
-        if context is None:
-            return self._build_messages(question, question_type)
-        return self._build_messages(question, question_type, context)
+        if not self._dialogue_context():
+            # 普通模式：行为零变化
+            if context is None:
+                return self._build_messages(question, question_type)
+            return self._build_messages(question, question_type, context)
+        if context and context.strip():
+            # 检索到内容：日志进问题之前，指令跟在检索内容后面
+            question = self._question_with_dialogue_context(question)
+            context = f"{context.strip()}\n\n{DIALOGUE_CONTEXT_NOTES}"
+            return self._build_messages(question, question_type, context)
+        # 没检索到内容（含降级）：指令单独成段跟在问题后面，不带检索段
+        question = self._question_with_dialogue_context(
+            question, notes=DIALOGUE_CONTEXT_NOTES
+        )
+        return self._build_messages(question, question_type)
 
     def _multimodal_messages(
         self,
@@ -737,12 +808,58 @@ class QuestionManager:
         见《2-骨架与配置》目录结构约定一节。
         检索上下文是回调的末位参数，没有上下文时按老签名调用，
         兼容不带 context 参数的回调。
+
+        项目模式的对话日志拼装与文本请求同一条路：日志进 user 靠前
+        位置、指令拼在检索内容之后（没检索到内容时拼在问题后面），
+        见《5-语音输入与流式ASR》项目模式一节。
         """
-        if context is None:
-            return self._build_multimodal_messages(question, image_data_url, question_type)
-        return self._build_multimodal_messages(
-            question, image_data_url, question_type, context
+        if not self._dialogue_context():
+            # 普通模式：行为零变化
+            if context is None:
+                return self._build_multimodal_messages(
+                    question, image_data_url, question_type
+                )
+            return self._build_multimodal_messages(
+                question, image_data_url, question_type, context
+            )
+        if context and context.strip():
+            question = self._question_with_dialogue_context(question)
+            context = f"{context.strip()}\n\n{DIALOGUE_CONTEXT_NOTES}"
+            return self._build_multimodal_messages(
+                question, image_data_url, question_type, context
+            )
+        question = self._question_with_dialogue_context(
+            question, notes=DIALOGUE_CONTEXT_NOTES
         )
+        return self._build_multimodal_messages(
+            question, image_data_url, question_type
+        )
+
+    def _dialogue_context(self) -> str:
+        """当前会话注入的对话日志上下文，普通模式是空串。"""
+        session = self._session
+        if session is None:
+            return ""
+        return (session.dialogue_context or "").strip()
+
+    def _question_with_dialogue_context(self, question: str, notes: str = "") -> str:
+        """把对话日志拼进问题文本的靠前位置。
+
+        user 消息的最终顺序是：对话日志 → 本轮问题 → 检索内容（由
+        build 回调把 context 追加在问题之后）。检索没取到内容时
+        ``notes`` 给出项目模式的附加指令，跟在问题后面单独成段。
+        没有注入日志、题面为空时原样返回，普通模式行为零变化。
+
+        :param question: 本轮问题文本。
+        :param notes: 可选的附加指令，拼在问题之后单独成段。
+        """
+        log_text = self._dialogue_context()
+        if not log_text or not question.strip():
+            return question
+        text = f"{DIALOGUE_CONTEXT_TITLE}：\n{log_text}\n\n问题：{question.strip()}"
+        if notes:
+            text = f"{text}\n\n{notes}"
+        return text
 
     async def _run_stream(
         self,
@@ -832,10 +949,10 @@ class QuestionManager:
                 level="ERROR",
                 request_id=request_id,
                 session_id=session.session_id,
-                code="E_DEEPSEEK_STREAM",
+                code="E_MODEL_STREAM",
             )
             self._notify_model_state(MODEL_STATE_ERROR, request_id)
-            self._sink.report_error("E_DEEPSEEK_STREAM", str(exc))
+            self._sink.report_error("E_MODEL_STREAM", str(exc))
         else:
             # 正常结束：状态回到 idle
             self._notify_model_state(MODEL_STATE_IDLE, request_id)
@@ -880,7 +997,7 @@ class QuestionManager:
         """这次请求的耗时指标来源。
 
         优先取注入客户端上的 ``name``；客户端没给就取配置里
-        ``providers.llm`` 的取值（``mock`` 或 ``deepseek``）。
+        ``providers.llm`` 的取值（``mock`` 或 ``openai``）。
         装配层按这个值选客户端，见《2-骨架与配置》配置结构一节。
         """
         name = getattr(self._client, "name", None)

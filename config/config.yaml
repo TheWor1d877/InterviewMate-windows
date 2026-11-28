@@ -14,7 +14,9 @@ ui:
 
 hotkeys:
   voice_toggle: F8
-  screenshot: F9
+  # 截图键是 F7：AHK 脚本（scripts/windows/hotkeys.ahk）的 F7 发 screenshot，
+  # 界面与备用全局监听按同一键位绑定；项目模式下它保持截图语义。
+  screenshot: F7
   new_question: ctrl+n
   cancel: escape
   reanalyze: F10
@@ -57,11 +59,11 @@ screenshot:
   # mss 抓屏不弹确认框，单次抓屏通常在几十毫秒内完成，这里留的是宽松上限
   timeout: 150
 
-deepseek:
+model:
   base_url: https://api.deepseek.com
   # 模型选的是 deepseek-flash，它声明支持 image 输入模态，截图这条路依赖它。
   # 换模型前先确认新模型支不支持图片。
-  model: deepseek-flash
+  name: deepseek-flash
   stream: true
   thinking: disabled
   reasoning_effort: low
@@ -82,11 +84,13 @@ rag:
   force_project_mode: false
 
 # Dify 检索服务的连接参数，取值见《2-骨架与配置》环境变量一节
-# 真实部署用 .env 里的 DIFY_BASE_URL / DIFY_DATASET_ID / DIFY_DATASET_API_KEY 覆盖
+# 三项真实取值不写在这里：从 .env 的 DIFY_BASE_URL / DIFY_DATASET_ID / DIFY_DATASET_API_KEY
+# 来，加载时按 app/config.py 的 ENV_OVERRIDES 映射覆盖本段同名键。
+# 这里留空串：没配环境变量时保持为空，便于识别「未配置」。
 dify:
-  base_url: http://your-dify-host/v1
-  dataset_id: your_dataset_id
-  api_key: your_dataset_api_key
+  base_url: ""
+  dataset_id: ""
+  api_key: ""
 
 coding:
   language: cpp
@@ -103,7 +107,7 @@ privacy:
 # 四个外部能力的实现选择。默认走真实实现；测试与本地开发时改成 mock，
 # 对应实现不连真实服务、不加载模型。
 providers:
-  llm: deepseek
+  llm: openai
   retrieval: dify
   asr: funasr
   screenshot: mss

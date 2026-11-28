@@ -30,7 +30,7 @@ from app.ui.panels.question_header import QuestionHeader
 from app.ui.status_bar import (
     ASR_VALUES,
     AUDIO_VALUES,
-    DEEPSEEK_VALUES,
+    MODEL_VALUES,
     DIFY_VALUES,
     RUNNING_VALUES,
     STATUS_LABELS,
@@ -112,9 +112,9 @@ def _config_data(
             "format": "png",
             "persist_files": False,
         },
-        "deepseek": {
+        "model": {
             "base_url": "https://api.deepseek.com",
-            "model": "deepseek-flash",
+            "name": "deepseek-flash",
             "stream": True,
             "thinking": "disabled",
             "reasoning_effort": "low",
@@ -227,19 +227,6 @@ class _GatedManager:
         self.started[index].set()
         await self.gates[index].wait()
 
-
-class _VoiceToggleRecorder:
-    """记录 F8 回调被调了几次的记录器。
-
-    返回 None，界面按同步回调处理，不会产生没被回收的协程；
-    界面要真是拿它当协程回调走后台执行，也能从 calls 看出来。
-    """
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def __call__(self) -> None:
-        self.calls += 1
 
 
 class _FakeScreenshotManager:
@@ -449,36 +436,40 @@ async def test_status_bar_renders_app_name_and_six_labels() -> None:
         await pilot.pause()
         text = app.query_one(StatusBar).render()
         assert APP_NAME in text
-        for label in ("RUNNING", "AUDIO", "ASR", "DIFY", "DEEPSEEK", "TTFT"):
+        for label in ("RUNNING", "AUDIO", "ASR", "DIFY", "MODEL", "TTFT"):
             assert label in text
 
 
 async def test_status_bar_label_order_is_fixed() -> None:
-    """六个短标签的顺序是 RUNNING、AUDIO、ASR、DIFY、DEEPSEEK、TTFT。"""
+    """八个短标签的顺序是 RUNNING、AUDIO、ASR、DIFY、MODEL、TTFT、MODE、SESSION。"""
     app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
         text = app.query_one(StatusBar).render()
-        positions = [text.index(label) for label in
-                     ("RUNNING", "AUDIO", "ASR", "DIFY", "DEEPSEEK", "TTFT")]
+        labels = ("RUNNING", "AUDIO", "ASR", "DIFY", "MODEL", "TTFT", "MODE", "SESSION")
+        positions = [text.index(f"{label}=") for label in labels]
         assert positions == sorted(positions)
-        assert STATUS_ORDER == ("running", "audio", "asr", "dify", "deepseek", "ttft")
+        assert STATUS_ORDER == (
+            "running", "audio", "asr", "dify", "model", "ttft", "mode", "session",
+        )
         assert STATUS_LABELS["running"] == "RUNNING"
         assert STATUS_LABELS["audio"] == "AUDIO"
         assert STATUS_LABELS["asr"] == "ASR"
         assert STATUS_LABELS["dify"] == "DIFY"
-        assert STATUS_LABELS["deepseek"] == "DEEPSEEK"
+        assert STATUS_LABELS["model"] == "MODEL"
         assert STATUS_LABELS["ttft"] == "TTFT"
+        assert STATUS_LABELS["mode"] == "MODE"
+        assert STATUS_LABELS["session"] == "SESSION"
 
 
 async def test_status_bar_default_text_matches_fixed_format() -> None:
-    """默认渲染文本就是冻结的固定格式。"""
+    """默认渲染文本就是冻结的固定格式：普通模式，没有会话。"""
     app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.query_one(StatusBar).render() == (
             "InterviewMate | RUNNING=stopped | AUDIO=off | ASR=idle | "
-            "DIFY=offline | DEEPSEEK=idle | TTFT=-"
+            "DIFY=offline | MODEL=idle | TTFT=- | MODE=普通 | SESSION=-"
         )
 
 
@@ -519,7 +510,7 @@ async def test_update_status_changes_rendered_text() -> None:
             audio="on",
             asr="ready",
             dify="degraded",
-            deepseek="streaming",
+            model="streaming",
             ttft_ms=250,
         )
         await pilot.pause()
@@ -528,7 +519,7 @@ async def test_update_status_changes_rendered_text() -> None:
         assert "AUDIO=on" in text
         assert "ASR=ready" in text
         assert "DIFY=degraded" in text
-        assert "DEEPSEEK=streaming" in text
+        assert "MODEL=streaming" in text
         assert "TTFT=250" in text
 
 
@@ -546,8 +537,10 @@ async def test_status_snapshot_matches_render() -> None:
             "audio": "off",
             "asr": "loading",
             "dify": "offline",
-            "deepseek": "idle",
+            "model": "idle",
             "ttft": "88",
+            "mode": "普通",
+            "session": "-",
         }
         text = bar.render()
         for key, value in snapshot.items():
@@ -561,7 +554,7 @@ async def test_status_snapshot_matches_render() -> None:
         ("audio", "muted", AUDIO_VALUES),
         ("asr", "warm", ASR_VALUES),
         ("dify", "down", DIFY_VALUES),
-        ("deepseek", "busy", DEEPSEEK_VALUES),
+        ("model", "busy", MODEL_VALUES),
     ],
 )
 async def test_update_status_rejects_illegal_value(
@@ -633,9 +626,9 @@ async def test_status_bar_second_line_shows_hint() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         bar = app.query_one(StatusBar)
-        bar.update_status(hint="E_DEEPSEEK_TIMEOUT 请求超时")
+        bar.update_status(hint="E_MODEL_TIMEOUT 请求超时")
         await pilot.pause()
-        assert bar.render_line(1).text == "E_DEEPSEEK_TIMEOUT 请求超时"
+        assert bar.render_line(1).text == "E_MODEL_TIMEOUT 请求超时"
 
 
 async def test_show_error_puts_code_and_detail_into_hint() -> None:
@@ -643,10 +636,10 @@ async def test_show_error_puts_code_and_detail_into_hint() -> None:
     app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.show_error("E_DEEPSEEK_TIMEOUT", "请求超时")
+        app.show_error("E_MODEL_TIMEOUT", "请求超时")
         await pilot.pause()
         bar = app.query_one(StatusBar)
-        assert bar.render_line(1).text == "E_DEEPSEEK_TIMEOUT 请求超时"
+        assert bar.render_line(1).text == "E_MODEL_TIMEOUT 请求超时"
 
 
 async def test_status_update_carries_hint_field() -> None:
@@ -659,7 +652,7 @@ async def test_status_update_carries_hint_field() -> None:
 # ----------------------------------------------------------------------
 # 状态栏按宽度自适应
 # ----------------------------------------------------------------------
-async def test_status_bar_wide_width_shows_all_six_items() -> None:
+async def test_status_bar_wide_width_shows_all_eight_items() -> None:
     """宽度够时画到屏幕上的状态行与固定格式逐字一致。"""
     app = InterviewMateApp(config=make_config())
     async with app.run_test(size=(WIDE_WIDTH, 30)) as pilot:
@@ -667,7 +660,7 @@ async def test_status_bar_wide_width_shows_all_six_items() -> None:
         bar = app.query_one(StatusBar)
         assert bar.render_line(0).text == (
             "InterviewMate | RUNNING=stopped | AUDIO=off | ASR=idle | "
-            "DIFY=offline | DEEPSEEK=idle | TTFT=-"
+            "DIFY=offline | MODEL=idle | TTFT=- | MODE=普通 | SESSION=-"
         )
 
 
@@ -771,7 +764,7 @@ async def test_publish_status_updates_status_bar() -> None:
             audio="on",
             asr="ready",
             dify="ready",
-            deepseek="streaming",
+            model="streaming",
             ttft_ms=321,
         )
         await pilot.pause()
@@ -780,7 +773,7 @@ async def test_publish_status_updates_status_bar() -> None:
         assert "AUDIO=on" in text
         assert "ASR=ready" in text
         assert "DIFY=ready" in text
-        assert "DEEPSEEK=streaming" in text
+        assert "MODEL=streaming" in text
         assert "TTFT=321" in text
 
 
@@ -792,7 +785,7 @@ async def test_publish_status_event_type_and_defaults() -> None:
     assert event.audio == "off"
     assert event.asr == "idle"
     assert event.dify == "offline"
-    assert event.deepseek == "idle"
+    assert event.model == "idle"
     assert event.ttft_ms is None
 
 
@@ -810,13 +803,16 @@ async def test_app_builds_its_own_bus_when_none_given() -> None:
 # ----------------------------------------------------------------------
 # 快捷键
 # ----------------------------------------------------------------------
-async def test_bindings_cover_nine_shortcuts() -> None:
-    """快捷键按配置绑定，七个来自 hotkeys 段，两个退出键固定。"""
+async def test_bindings_cover_eight_shortcuts() -> None:
+    """快捷键按配置绑定，六个来自 hotkeys 段，两个退出键固定。
+
+    F8 按住说话由 AHK 全局热键处理，不在界面绑定，
+    见《5-语音输入与流式ASR》F8 交互一节。
+    """
     app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.hotkey_bindings == {
-            "f8": "voice_toggle",
             "f9": "screenshot",
             "ctrl+n": "new_question",
             "escape": "cancel",
@@ -858,7 +854,6 @@ async def test_non_quit_actions_are_callable() -> None:
     app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
-        app.action_voice_toggle()
         app.action_screenshot()
         app.action_new_question()
         app.action_cancel()
@@ -868,30 +863,13 @@ async def test_non_quit_actions_are_callable() -> None:
         assert app.is_running
 
 
-async def test_voice_toggle_calls_callback_when_not_marked() -> None:
-    """没标记全局热键时，F8 照旧调注入的回调。"""
-    recorder = _VoiceToggleRecorder()
-    app = InterviewMateApp(config=make_config(), voice_toggle=recorder)
+async def test_f8_is_not_bound_in_the_ui() -> None:
+    """F8 不在界面绑定里：按住说话由 AHK 全局热键处理。"""
+    app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert app.global_hotkeys_active is False
-        app.action_voice_toggle()
-        await pilot.pause()
-        assert recorder.calls == 1
-
-
-async def test_mark_global_hotkeys_active_stops_voice_toggle() -> None:
-    """标记全局热键后，F8 不再调注入的回调。"""
-    recorder = _VoiceToggleRecorder()
-    app = InterviewMateApp(config=make_config(), voice_toggle=recorder)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        app.mark_global_hotkeys_active()
-        await pilot.pause()
-        assert app.global_hotkeys_active is True
-        app.action_voice_toggle()
-        await pilot.pause()
-        assert recorder.calls == 0
+        assert "f8" not in app.hotkey_bindings
+        assert getattr(app, "action_voice_toggle", None) is None
 
 
 async def test_screenshot_calls_manager_when_not_marked() -> None:
@@ -920,8 +898,8 @@ async def test_mark_global_hotkeys_active_stops_screenshot() -> None:
         assert manager.captures == 0
 
 
-async def test_global_hotkeys_mark_keeps_f8_f9_bindings() -> None:
-    """标记全局热键不改绑定，f8 与 f9 照旧在 hotkey_bindings 里。"""
+async def test_global_hotkeys_mark_keeps_f9_binding() -> None:
+    """标记全局热键不改绑定，f9 照旧在 hotkey_bindings 里。"""
     app = InterviewMateApp(config=make_config())
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -929,7 +907,7 @@ async def test_global_hotkeys_mark_keeps_f8_f9_bindings() -> None:
         app.mark_global_hotkeys_active()
         await pilot.pause()
         assert app.hotkey_bindings == before
-        assert app.hotkey_bindings["f8"] == "voice_toggle"
+        assert "f8" not in app.hotkey_bindings
         assert app.hotkey_bindings["f9"] == "screenshot"
 
 
@@ -1090,10 +1068,10 @@ async def test_manager_cancellation_does_not_crash_app() -> None:
 
 
 # ----------------------------------------------------------------------
-# DEEPSEEK 状态跟着生成过程变
+# MODEL 状态跟着生成过程变
 # ----------------------------------------------------------------------
-async def test_deepseek_is_streaming_while_generating() -> None:
-    """提交后等模型输出时 DEEPSEEK 是 streaming，提示位显示生成中。"""
+async def test_model_is_streaming_while_generating() -> None:
+    """提交后等模型输出时 MODEL 是 streaming，提示位显示生成中。"""
     manager = _FakeManager()
     manager.gate = asyncio.Event()
     app = InterviewMateApp(config=make_config(), manager=manager)
@@ -1108,14 +1086,14 @@ async def test_deepseek_is_streaming_while_generating() -> None:
         # 等请求真的发出去，这时状态已经置成 streaming
         await asyncio.wait_for(manager.started.wait(), timeout=5)
         await pilot.pause()
-        assert "DEEPSEEK=streaming" in bar.render()
+        assert "MODEL=streaming" in bar.render()
         assert bar.render_line(1).text == "生成中"
         manager.gate.set()
         await app.workers.wait_for_complete()
 
 
-async def test_deepseek_returns_to_idle_after_generation() -> None:
-    """请求正常结束后 DEEPSEEK 置回 idle，提示位清空。"""
+async def test_model_returns_to_idle_after_generation() -> None:
+    """请求正常结束后 MODEL 置回 idle，提示位清空。"""
     manager = _FakeManager()
     app = InterviewMateApp(config=make_config(), manager=manager)
     async with app.run_test() as pilot:
@@ -1127,25 +1105,25 @@ async def test_deepseek_returns_to_idle_after_generation() -> None:
         panel.text = "什么是 RAII"
         await pilot.press("enter")
         await app.workers.wait_for_complete()
-        assert "DEEPSEEK=idle" in bar.render()
+        assert "MODEL=idle" in bar.render()
         assert bar.render_line(1).text == ""
 
 
-async def test_deepseek_becomes_error_when_manager_reports_error() -> None:
-    """管理器报错时 DEEPSEEK 置 error，提示位显示错误码。"""
+async def test_model_becomes_error_when_manager_reports_error() -> None:
+    """管理器报错时 MODEL 置 error，提示位显示错误码。"""
     manager = _FakeManager()
     app = InterviewMateApp(config=make_config(), manager=manager)
     async with app.run_test() as pilot:
         await pilot.pause()
         bar = app.query_one(StatusBar)
-        app.show_error("E_DEEPSEEK_TIMEOUT", "请求超时")
+        app.show_error("E_MODEL_TIMEOUT", "请求超时")
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert "DEEPSEEK=error" in bar.render()
-        assert "E_DEEPSEEK_TIMEOUT" in bar.render_line(1).text
+        assert "MODEL=error" in bar.render()
+        assert "E_MODEL_TIMEOUT" in bar.render_line(1).text
 
 
-async def test_old_generation_does_not_reset_deepseek_status() -> None:
+async def test_old_generation_does_not_reset_model_status() -> None:
     """上一轮被新问题取消时，状态归最新一轮管，不改回 idle。"""
     manager = _GatedManager()
     app = InterviewMateApp(config=make_config(), manager=manager)
@@ -1162,20 +1140,20 @@ async def test_old_generation_does_not_reset_deepseek_status() -> None:
         await pilot.press("enter")
         await asyncio.wait_for(manager.started[1].wait(), timeout=5)
         await pilot.pause()
-        assert "DEEPSEEK=streaming" in bar.render()
+        assert "MODEL=streaming" in bar.render()
         # 上一轮先结束，状态不能被它改回 idle
         manager.gates[0].set()
         await pilot.pause()
         await pilot.pause()
-        assert "DEEPSEEK=streaming" in bar.render()
+        assert "MODEL=streaming" in bar.render()
         # 最新一轮结束才回到 idle
         manager.gates[1].set()
         await app.workers.wait_for_complete()
-        assert "DEEPSEEK=idle" in bar.render()
+        assert "MODEL=idle" in bar.render()
 
 
-async def test_deepseek_change_keeps_other_fields() -> None:
-    """改 DEEPSEEK 时其余五个字段不动。"""
+async def test_model_change_keeps_other_fields() -> None:
+    """改 MODEL 时其余五个字段不动。"""
     manager = _FakeManager()
     app = InterviewMateApp(config=make_config(), manager=manager)
     async with app.run_test() as pilot:
@@ -1186,11 +1164,11 @@ async def test_deepseek_change_keeps_other_fields() -> None:
             audio="on",
             asr="ready",
             dify="ready",
-            deepseek="streaming",
+            model="streaming",
             ttft_ms=250,
         )
         await pilot.pause()
-        app.show_error("E_DEEPSEEK_TIMEOUT", "请求超时")
+        app.show_error("E_MODEL_TIMEOUT", "请求超时")
         await app.workers.wait_for_complete()
         await pilot.pause()
         text = bar.render()
@@ -1199,7 +1177,7 @@ async def test_deepseek_change_keeps_other_fields() -> None:
         assert "ASR=ready" in text
         assert "DIFY=ready" in text
         assert "TTFT=250" in text
-        assert "DEEPSEEK=error" in text
+        assert "MODEL=error" in text
 
 
 # ----------------------------------------------------------------------

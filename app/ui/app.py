@@ -1,8 +1,11 @@
 """Textual 应用。
 
 界面四段结构见《3-文本输入与流式回答》终端界面一节，快捷键见同节快捷键表：
-F8 语音开始与停止、F9 截图并立即提交、回车提交手动文本、Shift+回车换行、
+F7 截图并立即提交、回车提交手动文本、Shift+回车换行、
 Ctrl+N 创建新问题、F10 重新分析、Esc 取消、F3 查看检索来源、Q 退出。
+F8 按住说话由 AHK 全局热键（``scripts/windows/hotkeys.ahk``）承担：
+按下开始录音、松开停止并提交最终文本，经 socket 的 ``voice-start`` /
+``voice-stop`` 送到主进程，不在界面绑定。
 
 界面这边只做四件事：把状态栏接到事件总线上，把输入框与快捷键接到问题管理器上，
 把当前问题显示到右栏顶部，把检索来源与临时识别文字显示出来。
@@ -10,12 +13,15 @@ Ctrl+N 创建新问题、F10 重新分析、Esc 取消、F3 查看检索来源�
 截图管理器用 :meth:`InterviewMateApp.attach_screenshot_manager` 挂进来，
 挂之前界面照常能起。
 
-F8 的语音采集由装配层用 :meth:`InterviewMateApp.attach_voice_toggle` 接进来：
-界面不 import 语音层与装配层的实现类，回调没接上时按 F8 只记日志、不报错。
-
 检索来源面板是临时浮层，按 F3 打开、列出后按 Esc 或再按 F3 关掉，
 见《6-Dify检索与项目知识》检索来源展示一节；临时识别文字显示在状态栏下方的一行，
 见《5-语音输入与流式ASR》状态显示一节。
+
+项目模式这一波 UI 只做显示与切换：双路临时转写订阅事件总线的
+``dialogue.partial`` / ``dialogue.sentence``（引擎层发布，这里只渲染），
+F10 上下文视图用注入的 ``text_provider`` 现取对话日志全文，
+状态栏与快捷键提示栏随模式切换。模式的开与关由集成层调
+:meth:`set_project_mode`，引擎对象与数据源由集成层注入，界面不 import 引擎模块。
 """
 
 from __future__ import annotations
@@ -23,8 +29,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Callable
-from typing import Any, Awaitable
+
+from typing import Any, Awaitable, Callable
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -34,6 +40,9 @@ from app.config import AppConfig, current_config, load_config
 from app.core.event_bus import EventBus
 from app.ui.layout import MainLayout
 from app.ui.panels.answer_panel import AnswerPanel
+from app.ui.panels.context_view import ContextView
+from app.ui.panels.dialogue_temp import DialogueTempPanel
+from app.ui.panels.hotkey_bar import HotkeyBar
 from app.ui.panels.input_panel import QuestionInputPanel
 from app.ui.panels.navigation_panel import NavigationPanel
 from app.ui.panels.question_header import QuestionHeader
@@ -42,25 +51,27 @@ from app.ui.panels.voice_text import VoiceTextPanel
 from app.ui.status_bar import StatusBar, StatusUpdate
 from app.utils.logger import log_event
 
-__all__ = ["InterviewMateApp", "VoiceToggleCallback"]
+__all__ = ["InterviewMateApp"]
 
 
 # 状态栏订阅的事件类型名，与 StatusUpdate.type 一致
 STATUS_EVENT_TYPE = "status.update"
 
-# 按一次 F8 的回调：无参数，同步函数或协程函数都行。
-# 语义与 socket 的 ``voice-toggle`` 一致：正在采集就停止并提交最终文本，
-# 没在采集就开始采集，见《5-语音输入与流式ASR》F8 交互一节。
-VoiceToggleCallback = Callable[[], Any]
+# 项目模式的双路转写事件类型名，引擎层发布，这里只订阅渲染
+DIALOGUE_PARTIAL_EVENT = "dialogue.partial"
+DIALOGUE_SENTENCE_EVENT = "dialogue.sentence"
 
 # 生成过程中状态栏提示位显示的短提示
 GENERATING_HINT = "生成中"
 
 # 界面这边自己撞上的异常用这个错误码，与《2-骨架与配置》错误码表一致
-STREAM_ERROR_CODE = "E_DEEPSEEK_STREAM"
+STREAM_ERROR_CODE = "E_MODEL_STREAM"
 
 # 截图提问在右栏顶部显示的题面，没有语音文字时用它
 SCREENSHOT_QUESTION_TEXT = "截图提问"
+
+# 上下文视图打开但数据源还没注入时显示的提示
+CONTEXT_NO_PROVIDER_HINT = "上下文数据源未接入"
 
 
 class InterviewMateApp(App):
@@ -80,7 +91,7 @@ class InterviewMateApp(App):
         config: AppConfig | None = None,
         bus: EventBus | None = None,
         manager: Any | None = None,
-        voice_toggle: VoiceToggleCallback | None = None,
+
     ) -> None:
         super().__init__()
         # 显式注入的配置只给本次构造用，不写进程级配置；
@@ -98,32 +109,36 @@ class InterviewMateApp(App):
         self._screenshot_manager: Any | None = None
         # 输入路由器由装配层挂进来，手工输入回车走它，只用 route_text
         self._input_router: Any | None = None
-        # 按一次 F8 的回调，由装配层挂进来，界面不 import 语音层的实现类
-        self._voice_toggle: VoiceToggleCallback | None = voice_toggle
+
         # 当前会话的检索来源，普通字典，字段是 document_name、score、content
         # 来源存进会话后一直留着，模型输出结束也能再按 F3 查
         self._rag_sources: list[dict] = []
-        # 最近一次状态更新的快照，改 DEEPSEEK 时按快照整体重发
+        # 最近一次状态更新的快照，改 MODEL 时按快照整体重发
         self._status: dict[str, Any] = {
             "running": "stopped",
             "audio": "off",
             "asr": "idle",
             "dify": "offline",
-            "deepseek": "idle",
+            "model": "idle",
             "ttft_ms": None,
             "hint": "",
         }
-        # 生成轮次编号，只有最新一轮能改状态栏的 DEEPSEEK 字段
+        # 生成轮次编号，只有最新一轮能改状态栏的 MODEL 字段
         self._generation_id = 0
         # 报过错的那一轮编号，别的轮次不受影响
         self._error_generation = -1
         # 按配置绑定的快捷键：键名 -> action 名
         self._hotkey_bindings: dict[str, str] = {}
         self._bind_hotkeys()
-        # 全局热键监听接管 F8 与 F9 后置 True，界面这边不再处理这两个键
+        # 全局热键监听接管截图键后置 True，界面这边不再处理截图键；
+        # F8 按住说话由 AHK 全局热键处理，本来就不在界面绑定
         self._global_hotkeys_active: bool = False
         # 当前这段语音已经识别出来的累计文本，语音流结束时清零
         self._voice_text: str = ""
+        # 项目模式开关，由集成层调 set_project_mode 切换，界面自己不绑键
+        self._project_mode: bool = False
+        # 上下文视图的日志全文数据源，由集成层注入，界面不 import 引擎模块
+        self._text_provider: Callable[[], str] | None = None
 
     # ------------------------------------------------------------------
     # 快捷键
@@ -135,8 +150,9 @@ class InterviewMateApp(App):
         键名要小写。绑定后 :attr:`hotkey_bindings` 里是实际生效的键位。
         """
         hotkeys = self._config.hotkeys
+        # F8 按住说话由 AHK 全局热键经 socket 处理，不在界面绑定，
+        # 见《5-语音输入与流式ASR》F8 交互一节。
         mapping = (
-            (hotkeys.voice_toggle, "voice_toggle"),
             (hotkeys.screenshot, "screenshot"),
             (hotkeys.new_question, "new_question"),
             (hotkeys.cancel, "cancel"),
@@ -157,24 +173,23 @@ class InterviewMateApp(App):
         return dict(self._hotkey_bindings)
 
     def mark_global_hotkeys_active(self) -> None:
-        """标记全局热键监听已接管 F8 与 F9。
+        """标记全局热键监听已接管截图键。
 
         全局热键由 AutoHotkey v2 脚本（``scripts/windows/hotkeys.ahk``）捕获，
         终端失焦时也能触发；脚本调 ``python -m app.cli hotkey ...`` 通知主进程。
-        生效后同一次按键会被 Textual 绑定与全局链路各处理一次，
-        所以界面这边要短路这两个动作，见《5-语音输入与流式ASR》F8 交互一节。
-        全局热键链路不可用时不要调用本方法，界面绑定保持原来的语义：
-        按一下开始、再按一下停止。
+        生效后同一次截图键（F7）会被 Textual 绑定与全局链路各处理一次，
+        所以界面这边要短路截图动作。F8 按住说话不在界面绑定，
+        见《5-语音输入与流式ASR》F8 交互一节。
         """
         self._global_hotkeys_active = True
         log_event(
             "ui.hotkey.global_active",
-            "全局热键监听已接管 F8 与 F9，界面不再处理这两个键",
+            "全局热键监听已接管截图键，界面不再处理截图键",
         )
 
     @property
     def global_hotkeys_active(self) -> bool:
-        """全局热键监听是否已接管 F8 与 F9。"""
+        """全局热键监听是否已接管截图键（F8 不在界面绑定）。"""
         return self._global_hotkeys_active
 
     # ------------------------------------------------------------------
@@ -218,8 +233,10 @@ class InterviewMateApp(App):
         yield MainLayout(self._config)
 
     async def on_mount(self) -> None:
-        """订阅状态栏更新事件，挂上检索来源浮层，并把焦点给底部输入框。"""
+        """订阅状态栏更新与双路转写事件，挂上检索来源浮层，并把焦点给底部输入框。"""
         self._bus.subscribe(STATUS_EVENT_TYPE, self._handle_status_update)
+        self._bus.subscribe(DIALOGUE_PARTIAL_EVENT, self._handle_dialogue_partial)
+        self._bus.subscribe(DIALOGUE_SENTENCE_EVENT, self._handle_dialogue_sentence)
         panel = RagSourcesPanel(id="rag-sources")
         # 浮层默认隐藏，按 F3 才打开
         panel.display = False
@@ -266,22 +283,206 @@ class InterviewMateApp(App):
         """应用使用的截图管理器，没有挂上时是 None。"""
         return self._screenshot_manager
 
-    def attach_voice_toggle(self, callback: VoiceToggleCallback | None) -> None:
-        """装配层把「按一次 F8」的回调挂进来。
+    # ------------------------------------------------------------------
+    # 项目模式
+    # ------------------------------------------------------------------
+    @property
+    def project_mode(self) -> bool:
+        """当前是否处于项目模式。"""
+        return self._project_mode
 
-        回调的语义与 socket 的 ``voice-toggle`` 一致：正在采集就停止并提交
-        最终文本，没在采集就开始采集，见《5-语音输入与流式ASR》F8 交互一节。
-        界面不 import 语音层与装配层的实现类，只调用这一个回调。
+    def attach_text_provider(self, text_provider: Callable[[], str]) -> None:
+        """装配层建好对话日志数据源后注入进来。
 
-        :param callback: 无参数的回调，同步函数或协程函数都行。
+        上下文视图打开与清空刷新时各调一次 ``text_provider()`` 现取全文，
+        界面不缓存旧日志，也不 import 对话引擎的实现模块。
+
+        :param text_provider: 返回当前对话日志全文的可调用对象。
         """
-        self._voice_toggle = callback
-        log_event("ui.voice_toggle_attached", "语音采集回调已挂到界面上")
+        self._text_provider = text_provider
+        log_event("ui.text_provider_attached", "上下文数据源已挂到界面上")
+        # 上下文视图开着的话，换数据源后立刻刷新一遍
+        view = self._context_view()
+        if view is not None and view.display:
+            self._refresh_context_view()
+
+    def set_project_mode(self, enabled: bool, session_id: str | None = None) -> None:
+        """切换项目模式，模式相关的显示跟着变。
+
+        状态栏的 MODE/SESSION、快捷键提示栏的键位、状态栏下方的双路临时转写区
+        一起切过去。进入项目模式时把普通模式的单路语音行清掉，两者互斥；
+        退出项目模式时双路转写的数据清掉，下次进入不带残留。
+        模式的开与关、项目模式键位的实际行为都归集成层管，界面只管显示。
+
+        :param enabled: 是否进入项目模式。
+        :param session_id: 当前会话 ID，只在项目模式下显示。
+        """
+        self._project_mode = bool(enabled)
+        mode = "project" if enabled else "normal"
+        status_bar = self._status_bar()
+        if status_bar is not None:
+            status_bar.set_mode(mode)
+            status_bar.set_session(session_id if enabled else None)
+        try:
+            hotkey_bar = self.query_one(HotkeyBar)
+        except NoMatches:
+            hotkey_bar = None
+        if hotkey_bar is not None:
+            hotkey_bar.set_mode(mode)
+        dialogue_panel = self._dialogue_panel()
+        if dialogue_panel is not None:
+            dialogue_panel.set_active(enabled)
+            if not enabled:
+                dialogue_panel.clear()
+        if enabled:
+            # 单路语音行让位给双路转写，两个临时区不同时显示
+            self.clear_voice_text()
+        log_event(
+            "ui.project_mode",
+            f"项目模式{'开启' if enabled else '关闭'}",
+        )
+
+    def show_dialogue_partial(self, role: str, text: str) -> None:
+        """显示一路还在识别中的临时转写。
+
+        数据始终记录，是否显示由项目模式开关管着。
+
+        :param role: 说话角色，例如 ``我``、``面试官``。
+        :param text: 这一路的临时转写。
+        """
+        panel = self._dialogue_panel()
+        if panel is None:
+            return
+        panel.show_partial(role, text)
+
+    def show_dialogue_sentence(self, role: str, text: str) -> None:
+        """显示一路已经定稿的句子。
+
+        :param role: 说话角色，例如 ``我``、``面试官``。
+        :param text: 定稿句。
+        """
+        panel = self._dialogue_panel()
+        if panel is None:
+            return
+        panel.show_sentence(role, text)
+
+    def clear_dialogue(self) -> None:
+        """清掉双路临时转写，并让上下文视图跟着刷新。
+
+        F11 重开一轮时由集成层先清对话引擎的数据，再调这个方法刷新视图：
+        上下文视图开着的话重新取一次日志全文，拿到的就是清空后的内容。
+        """
+        panel = self._dialogue_panel()
+        if panel is not None:
+            panel.clear()
+        view = self._context_view()
+        if view is None:
+            return
+        view.clear()
+        if view.display:
+            self._refresh_context_view()
+
+    def action_toggle_context_view(self) -> None:
+        """F10：右栏临时切成上下文视图，再按一次切回回答视图。
+
+        键位绑定留给集成层：配置里 F10 已绑定重新分析（reanalyze），
+        现有绑定以现有为准，项目模式激活时由集成层把 F10 切到这个 action。
+        """
+        view = self._context_view()
+        if view is None:
+            return
+        if view.display:
+            self._close_context_view()
+        else:
+            self._open_context_view()
 
     @property
-    def voice_toggle(self) -> VoiceToggleCallback | None:
-        """应用使用的语音采集回调，没有挂上时是 None。"""
-        return self._voice_toggle
+    def context_view_open(self) -> bool:
+        """上下文视图当前是否打开。"""
+        view = self._context_view()
+        return view is not None and view.display
+
+    def _open_context_view(self) -> None:
+        """打开上下文视图：右栏的问题与回答内容让位，日志全文顶上。"""
+        view = self._context_view()
+        if view is None:
+            return
+        self._refresh_context_view()
+        view.display = True
+        header = self._question_header()
+        if header is not None:
+            header.display = False
+        try:
+            self.query_one("#answer-scroll").display = False
+        except NoMatches:
+            pass
+        log_event("ui.context_view", "上下文视图已打开")
+
+    def _close_context_view(self) -> None:
+        """关掉上下文视图：回答视图回来，有题目的话题目也回来。"""
+        view = self._context_view()
+        if view is None:
+            return
+        view.display = False
+        header = self._question_header()
+        if header is not None:
+            header.display = bool(header.question)
+        try:
+            self.query_one("#answer-scroll").display = True
+        except NoMatches:
+            pass
+        log_event("ui.context_view", "上下文视图已关闭")
+
+    def _refresh_context_view(self) -> None:
+        """从注入的数据源现取一次日志全文显示到上下文视图。"""
+        view = self._context_view()
+        if view is None:
+            return
+        provider = self._text_provider
+        if provider is None:
+            view.show_text(CONTEXT_NO_PROVIDER_HINT)
+            return
+        try:
+            text = provider()
+        except Exception as exc:
+            log_event(
+                "ui.context_view_failed",
+                f"取对话日志全文失败：{exc}",
+                level="ERROR",
+            )
+            view.show_text(f"上下文读取失败：{exc}")
+            return
+        view.show_text(text)
+
+    def _handle_dialogue_partial(self, event: Any) -> None:
+        """双路转写临时事件的同步处理函数，把角色与文本写到临时区。
+
+        事件类由引擎层定义，这里只用 ``role`` / ``text`` 两个字段，
+        取不到按空值处理，不让界面崩。
+        """
+        role = str(getattr(event, "role", "") or "")
+        text = str(getattr(event, "text", "") or "")
+        self.show_dialogue_partial(role, text)
+
+    def _handle_dialogue_sentence(self, event: Any) -> None:
+        """双路转写定稿事件的同步处理函数。"""
+        role = str(getattr(event, "role", "") or "")
+        text = str(getattr(event, "text", "") or "")
+        self.show_dialogue_sentence(role, text)
+
+    def _dialogue_panel(self) -> DialogueTempPanel | None:
+        """取双路临时转写区，取不到时返回 None。"""
+        try:
+            return self.query_one(DialogueTempPanel)
+        except NoMatches:
+            return None
+
+    def _context_view(self) -> ContextView | None:
+        """取上下文视图，取不到时返回 None。"""
+        try:
+            return self.query_one(ContextView)
+        except NoMatches:
+            return None
 
     def show_question(self, text: str) -> None:
         """把当前问题显示到右栏顶部。
@@ -304,9 +505,9 @@ class InterviewMateApp(App):
         header.clear_question()
 
     def show_error(self, code: str, detail: str) -> None:
-        """把错误显示到状态栏提示位，并把 DEEPSEEK 置成 error。
+        """把错误显示到状态栏提示位，并把 MODEL 置成 error。
 
-        :param code: 错误码，例如 ``E_DEEPSEEK_TIMEOUT``。
+        :param code: 错误码，例如 ``E_MODEL_TIMEOUT``。
         :param detail: 一句话说明。
         """
         log_event("ui.error", f"{code} {detail}", level="ERROR", code=code)
@@ -316,7 +517,7 @@ class InterviewMateApp(App):
         if status_bar is not None:
             # 提示位先立刻显示，状态字段随后由状态事件带过去
             status_bar.set_hint(hint)
-        self._publish_deepseek_later("error", hint)
+        self._publish_model_later("error", hint)
 
     def store_rag_sources(self, entries: list[dict]) -> None:
         """只把检索来源存进当前会话，不打开浮层。
@@ -399,13 +600,13 @@ class InterviewMateApp(App):
     # ------------------------------------------------------------------
     def _handle_status_update(self, event: StatusUpdate) -> None:
         """状态更新事件的同步处理函数，把新状态刷到状态栏。"""
-        # 记下最近一次的状态，改 DEEPSEEK 时按快照整体重发，其余字段不受影响
+        # 记下最近一次的状态，改 MODEL 时按快照整体重发，其余字段不受影响
         self._status.update(
             running=event.running,
             audio=event.audio,
             asr=event.asr,
             dify=event.dify,
-            deepseek=event.deepseek,
+            model=event.model,
             ttft_ms=event.ttft_ms,
             hint=event.hint,
         )
@@ -418,7 +619,7 @@ class InterviewMateApp(App):
             audio=event.audio,
             asr=event.asr,
             dify=event.dify,
-            deepseek=event.deepseek,
+            model=event.model,
             ttft_ms=event.ttft_ms,
             hint=event.hint,
         )
@@ -450,51 +651,9 @@ class InterviewMateApp(App):
     # ------------------------------------------------------------------
     # 快捷键动作
     # ------------------------------------------------------------------
-    def action_voice_toggle(self) -> None:
-        """F8：语音开始与停止。
-
-        真正做采集启停的回调由装配层注入，语义与 socket 的 ``voice-toggle``
-        一致：正在采集就停止并提交最终文本，没在采集就开始采集，
-        见《5-语音输入与流式ASR》F8 交互一节。
-        回调没有接上时只记日志，不报错。
-        """
-        if self._global_hotkeys_active:
-            log_event(
-                "ui.hotkey.global_owned",
-                "F8 由全局热键监听处理，界面忽略这次语音动作",
-                level="DEBUG",
-            )
-            return
-        callback = self._voice_toggle
-        if callback is None:
-            log_event(
-                "ui.hotkey",
-                "快捷键 F8：语音采集回调没有接上，忽略这次语音动作",
-                level="WARNING",
-            )
-            return
-        try:
-            result = callback()
-        except asyncio.CancelledError:
-            log_event(
-                "ui.voice_toggle_cancelled",
-                "语音采集回调被取消",
-                level="DEBUG",
-            )
-            return
-        except Exception as exc:
-            log_event(
-                "ui.voice_toggle_failed",
-                f"语音采集回调执行失败：{exc}",
-                level="ERROR",
-            )
-            return
-        if inspect.isawaitable(result):
-            # 采集在事件循环里跑，放后台执行，界面不被卡住
-            self._spawn(result, "voice_toggle")
 
     def action_screenshot(self) -> None:
-        """F9：截图并立即提交。
+        """截图键（F7）：截图并立即提交。
 
         截图后端最多阻塞 120 秒（Windows 侧截图失败时会等待到超时后返回错误提示），
         所以整个流程放后台跑，界面不被卡住。
@@ -503,7 +662,7 @@ class InterviewMateApp(App):
         if self._global_hotkeys_active:
             log_event(
                 "ui.hotkey.global_owned",
-                "F9 由全局热键监听处理，界面忽略这次截图",
+                "截图键由全局热键监听处理，界面忽略这次截图",
                 level="DEBUG",
             )
             return
@@ -511,7 +670,7 @@ class InterviewMateApp(App):
         if manager is None:
             log_event(
                 "ui.hotkey",
-                "快捷键 F9：截图管理器没有挂上，忽略这次截图",
+                "快捷键截图键：截图管理器没有挂上，忽略这次截图",
                 level="WARNING",
             )
             return
@@ -697,7 +856,7 @@ class InterviewMateApp(App):
         *args: Any,
         target: Any | None = None,
     ) -> None:
-        """开始一轮生成：DEEPSEEK 置 streaming，结束后置回 idle，出错时置 error。
+        """开始一轮生成：MODEL 置 streaming，结束后置回 idle，出错时置 error。
 
         :param method_name: 方法名。
         :param args: 传给方法的参数。
@@ -714,7 +873,7 @@ class InterviewMateApp(App):
         generation = self._generation_id
 
         async def _runner() -> None:
-            await self._publish_deepseek("streaming", GENERATING_HINT)
+            await self._publish_model("streaming", GENERATING_HINT)
             try:
                 result = method(*args)
                 if inspect.isawaitable(result):
@@ -733,7 +892,7 @@ class InterviewMateApp(App):
                     f"问题管理器方法 {method_name} 执行失败：{exc}",
                     level="ERROR",
                 )
-                await self._publish_deepseek(
+                await self._publish_model(
                     "error", f"{STREAM_ERROR_CODE} {exc}"
                 )
                 return
@@ -742,7 +901,7 @@ class InterviewMateApp(App):
         self._spawn(_runner(), method_name)
 
     async def _finish_generation(self, generation: int) -> None:
-        """一轮生成的收尾：正常结束把 DEEPSEEK 置回 idle。
+        """一轮生成的收尾：正常结束把 MODEL 置回 idle。
 
         只有最新一轮能改状态：上一轮被新问题取消时，状态归新一轮管。
         这一轮报过错的话状态留在 error，不改回 idle。
@@ -751,12 +910,12 @@ class InterviewMateApp(App):
             return
         if self._error_generation == generation:
             return
-        await self._publish_deepseek("idle", "")
+        await self._publish_model("idle", "")
 
-    async def _publish_deepseek(self, deepseek: str, hint: str) -> None:
-        """改 DEEPSEEK 字段与提示位，其余五个字段按快照原样重发。"""
+    async def _publish_model(self, model: str, hint: str) -> None:
+        """改 MODEL 字段与提示位，其余五个字段按快照原样重发。"""
         fields = dict(self._status)
-        fields["deepseek"] = deepseek
+        fields["model"] = model
         fields["hint"] = hint
         await self.publish_status(**fields)
 
@@ -786,11 +945,11 @@ class InterviewMateApp(App):
         voice_text = getattr(self._manager, "voice_text", "") or ""
         return voice_text.strip() or SCREENSHOT_QUESTION_TEXT
 
-    def _publish_deepseek_later(self, deepseek: str, hint: str) -> None:
+    def _publish_model_later(self, model: str, hint: str) -> None:
         """在后台发布一次状态更新，发布不了就只记日志。"""
         try:
             self.run_worker(
-                self._publish_deepseek(deepseek, hint),
+                self._publish_model(model, hint),
                 name="status",
                 exit_on_error=False,
             )

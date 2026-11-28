@@ -84,7 +84,11 @@ class _FakeCapture:
 
 
 class _FakeEngine:
-    """假 ASR 引擎：记下调用，按块返回增量文本，冲刷返回最后一段。"""
+    """假 ASR 引擎：记下调用，按块返回增量文本，冲刷返回最后一段。
+
+    ``recording`` 给出时引擎带 ``take_recording``（对齐 FunASREngine 的
+    整段录音缓存），不给时引擎不支持录音，重识别走流式降级路径。
+    """
 
     def __init__(
         self,
@@ -92,14 +96,17 @@ class _FakeEngine:
         load_error: Exception | None = None,
         final_text: str = "",
         feed_text: Callable[[Any], str] | None = None,
+        recording: Any = None,
     ) -> None:
         self.state: str = STATE_LOADING
         self.load_error = load_error
         self.final_text = final_text
         self.feed_text = feed_text
+        self.recording = recording
         self.load_calls = 0
         self.feed_calls: list[Any] = []
         self.flush_calls = 0
+        self.take_recording_calls = 0
         # 冲刷时等这个闸门，用来制造"正在停止"的窗口
         self.flush_gate: asyncio.Event | None = None
         self.flush_started = asyncio.Event()
@@ -128,6 +135,48 @@ class _FakeEngine:
         text = self.final_text
         self.final_text = ""
         return text
+
+    def take_recording(self) -> Any:
+        """取走整段录音缓存（只在构造时给了录音才支持）。"""
+        if self.recording is None:
+            raise AttributeError("take_recording")
+        self.take_recording_calls += 1
+        recording = self.recording
+        self.recording = None
+        return recording
+
+
+class _FakeRefiner:
+    """假重识别器：预置重识别文本与纠正文本，可注入错误。"""
+
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        corrected: str | None = None,
+        error: Exception | None = None,
+        correct_error: Exception | None = None,
+    ) -> None:
+        self.text = text
+        self.corrected = corrected
+        self.error = error
+        self.correct_error = correct_error
+        self.recognize_calls: list[tuple[Any, int]] = []
+        self.correct_calls: list[str] = []
+
+    async def recognize(self, audio: Any, sample_rate: int) -> str:
+        """整段重识别，记下音频与采样率。"""
+        self.recognize_calls.append((audio, sample_rate))
+        if self.error is not None:
+            raise self.error
+        return self.text
+
+    async def correct_text(self, text: str) -> str:
+        """热词纠正，记下输入文本。"""
+        self.correct_calls.append(text)
+        if self.correct_error is not None:
+            raise self.correct_error
+        return self.corrected if self.corrected is not None else text
 
 
 class _Recorder:
@@ -185,6 +234,7 @@ def _make_harness(
     capture: _FakeCapture | None = None,
     asr_engine_factory: Callable[[str], Any] | None = None,
     partial_text_cumulative: bool = False,
+    final_refiner: _FakeRefiner | None = None,
 ) -> _Harness:
     """造一套替身与被测的管理器。"""
     engine = engine if engine is not None else _FakeEngine()
@@ -206,6 +256,7 @@ def _make_harness(
         on_partial_text=partial,
         asr_engine_factory=asr_engine_factory,
         partial_text_cumulative=partial_text_cumulative,
+        final_refiner=final_refiner,
     )
     return _Harness(
         manager=manager,
@@ -806,3 +857,98 @@ async def test_cancelled_stop_leaves_no_final_latency(
         await stopping
 
     assert isolated_recorder.samples(ASR_FINAL_LATENCY_METRIC) == []
+
+# --------------------------------------------------------------------------
+# 最终文本重识别（SenseVoice + 热词纠正）
+# --------------------------------------------------------------------------
+async def test_final_refiner_replaces_streaming_text() -> None:
+    """有录音时最终文本用重识别结果，流式文本不提交。"""
+    engine = _FakeEngine(final_text="流式文本", recording=np.full(3200, 0.5, dtype="float32"))
+    refiner = _FakeRefiner(text="重识别文本")
+    harness = _make_harness(engine=engine, final_refiner=refiner)
+
+    await harness.manager.toggle()
+    harness.capture.push()
+    await _wait_until(lambda: bool(harness.engine.feed_calls))
+    await harness.manager.stop()
+
+    assert harness.final.texts == ["重识别文本"]
+    assert engine.take_recording_calls == 1
+    # 冲刷之前取录音，冲刷后录音缓存已被清掉
+    assert refiner.recognize_calls[0][1] == 16000
+
+
+async def test_final_refiner_error_falls_back_to_corrected_streaming() -> None:
+    """重识别失败退回流式文本，流式文本同样过热词纠正。"""
+    engine = _FakeEngine(final_text="流式文本", recording=np.zeros(3200, dtype="float32"))
+    refiner = _FakeRefiner(error=RuntimeError("重识别崩了"), corrected="纠正文本")
+    harness = _make_harness(engine=engine, final_refiner=refiner)
+
+    await harness.manager.toggle()
+    harness.capture.push()
+    await _wait_until(lambda: bool(harness.engine.feed_calls))
+    await harness.manager.stop()
+
+    assert harness.final.texts == ["纠正文本"]
+    assert refiner.recognize_calls and refiner.correct_calls == ["流式文本"]
+
+
+async def test_final_refiner_empty_result_falls_back() -> None:
+    """重识别结果为空串时退回流式文本，不空提交。"""
+    engine = _FakeEngine(final_text="流式文本", recording=np.zeros(3200, dtype="float32"))
+    refiner = _FakeRefiner(text="", corrected="纠正文本")
+    harness = _make_harness(engine=engine, final_refiner=refiner)
+
+    await harness.manager.toggle()
+    harness.capture.push()
+    await _wait_until(lambda: bool(harness.engine.feed_calls))
+    await harness.manager.stop()
+
+    assert harness.final.texts == ["纠正文本"]
+
+
+async def test_engine_without_recording_uses_correct_text_only() -> None:
+    """引擎没有整段录音时重识别跳过，流式文本过热词纠正后提交。"""
+    engine = _FakeEngine(final_text="流式文本")
+    refiner = _FakeRefiner(text="不该被用到", corrected="纠正文本")
+    harness = _make_harness(engine=engine, final_refiner=refiner)
+
+    await harness.manager.toggle()
+    harness.capture.push()
+    await _wait_until(lambda: bool(harness.engine.feed_calls))
+    await harness.manager.stop()
+
+    assert harness.final.texts == ["纠正文本"]
+    assert refiner.recognize_calls == []
+
+
+async def test_no_refiner_keeps_streaming_text() -> None:
+    """没配重识别器时最终文本就是流式结果，行为与从前一致。"""
+    engine = _FakeEngine(final_text="流式文本", recording=np.zeros(3200, dtype="float32"))
+    harness = _make_harness(engine=engine)
+
+    await harness.manager.toggle()
+    harness.capture.push()
+    await _wait_until(lambda: bool(harness.engine.feed_calls))
+    await harness.manager.stop()
+
+    assert harness.final.texts == ["流式文本"]
+    # 录音缓存照常取走，只是没有重识别器时不会被使用
+    assert engine.take_recording_calls == 1
+
+
+async def test_correct_text_error_keeps_streaming_text() -> None:
+    """热词纠正也失败时保持流式原文，最终文本不丢。"""
+    engine = _FakeEngine(final_text="流式文本", recording=np.zeros(3200, dtype="float32"))
+    refiner = _FakeRefiner(
+        error=RuntimeError("重识别崩了"),
+        correct_error=RuntimeError("纠正崩了"),
+    )
+    harness = _make_harness(engine=engine, final_refiner=refiner)
+
+    await harness.manager.toggle()
+    harness.capture.push()
+    await _wait_until(lambda: bool(harness.engine.feed_calls))
+    await harness.manager.stop()
+
+    assert harness.final.texts == ["流式文本"]

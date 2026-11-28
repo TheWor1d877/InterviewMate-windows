@@ -11,7 +11,7 @@
   （:func:`probe_screenshot_interface`），``start`` 的第 3、4 步与 ``test`` 自检都用；
 - 进程装配：:func:`run_main` 写 PID 文件、建通信服务端、启动界面、退出时收尾。
 
-M1 阶段没有真实 provider 实现（DeepSeek 客户端、Dify、FunASR、截图分别在
+M1 阶段没有真实 provider 实现（模型客户端、Dify、FunASR、截图分别在
 M2/M4/M8 落地），因此这里不造假的 provider 类：状态字段按《2-骨架与配置》状态字段
 取值表的缺省值给，截图只做接口能力检查，不落盘存图。
 
@@ -26,16 +26,29 @@ M4/M5 起检索与语音两条链路也真的接上了：:func:`assemble_retriev
 检索失败不让问题处理崩掉，语音停止后最终文本自动提交，
 见《6-Dify检索与项目知识》检索流程一节与《5-语音输入与流式ASR》F8 交互一节。
 
-界面按 F8 与 socket 的 ``voice-toggle`` 走同一条语音链路，界面按 F3 才弹
+F8 按住说话由 AHK 全局热键（``scripts/windows/hotkeys.ahk``）承担：按下发
+``voice-start``、松开发 ``voice-stop``，主进程与 socket 的 ``voice-toggle``
+走同一条语音链路，界面不再绑定 F8；界面按 F3 才弹
 检索来源浮层、检索完成时来源只静默存下，代码题判定出来时通知分发器切形态，
 启动时按配置预加载 ASR，见《2-骨架与配置》命令行入口一节第 9 步。
 
 M7 起三种输入汇到一条路：:func:`build_input_router` 造输入路由器，
 手工输入回车、语音最终文本、截图都交给它，提交回调指向问题管理器，
-见《8-集成与验收》三种输入的汇合一节。socket 的五个动作由
+见《8-集成与验收》三种输入的汇合一节。socket 的七个动作由
 :class:`~app.inputs.global_command.GlobalCommandDispatcher` 统一分发，
-:func:`build_handlers` 只是它的薄封装。DEEPSEEK 字段由问题管理器的状态回调
+:func:`build_handlers` 只是它的薄封装。MODEL 字段由问题管理器的状态回调
 更新，不再写死，见《2-骨架与配置》状态字段取值表。
+
+项目模式的装配也在这里：:func:`run_main` 组装 :class:`DialogueLog` 与
+:class:`~app.audio.project_mode.ProjectModeController`（双流各自一个独立的
+FunASR 引擎实例，采集走平台 WASAPI 后端），对话日志全文作为上下文视图的
+数据源挂到界面。socket 的十个动作由分发器统一分发：``project-mode-toggle``
+切换项目模式并把 F10 切到上下文视图，``context-view-toggle`` 切换上下文
+视图，``context-clear`` 封存当前对话日志并重开一轮。项目模式运行中 F8 的
+语义变成截取面试官问题：按下开窗口、松开把窗口内的面试官语句标成问题并
+提交，提交时把对话日志 ``recent_text()`` 作为 ``dialogue_context`` 传给
+问题管理器，user 消息按「对话日志 → 本轮问题 → 检索内容」的顺序拼装，
+见《5-语音输入与流式ASR》项目模式一节。
 
 平台相关的能力（截图、音频、进程通信、进程存活探测、编译器）都走
 :mod:`app.platform` 门面，:func:`app.platform.get_platform` 是全仓唯一选择平台的
@@ -76,6 +89,8 @@ from app.audio.funasr_engine import (
     STATE_READY,
     FunASREngine,
 )
+from app.audio.project_mode import ProjectModeController
+from app.audio.sensevoice_engine import SenseVoiceEngine
 from app.config import (
     DEFAULT_CONFIG_PATH,
     REPO_ROOT,
@@ -100,10 +115,16 @@ from app.core.question_manager import (
     RetrievalFunc,
     SourcesCallback,
 )
+from app.dialogue.dialogue_log import DialogueLog
 from app.inputs.global_command import (
+    ACTION_CONTEXT_CLEAR,
+    ACTION_CONTEXT_VIEW_TOGGLE,
+    ACTION_PROJECT_MODE_TOGGLE,
     ACTION_SCREENSHOT,
     ACTION_STATUS,
     ACTION_STOP,
+    ACTION_VOICE_START,
+    ACTION_VOICE_STOP,
     ACTION_VOICE_TOGGLE,
     ACTION_WARMUP,
     GlobalCommandDispatcher,
@@ -115,10 +136,10 @@ from app.inputs.global_hotkeys import (
 )
 from app.inputs.hotkey_controller import RESULT_IGNORED, HotkeyController
 from app.inputs.input_router import InputRouter
-from app.llm.deepseek_client import DeepSeekClient
+from app.llm.openai_compat_client import OpenAICompatClient
 from app.llm.mock_client import MockClient
 from app.llm.prompt_manager import PromptManager
-from app.llm.question_classifier_client import DeepSeekQuestionClassifier
+from app.llm.question_classifier_client import OpenAICompatQuestionClassifier
 from app.llm.stream_parser import StreamParser
 from app.output.event_dispatcher import EventDispatcher
 from app.platform import get_platform
@@ -177,11 +198,13 @@ __all__ = [
     "select_client",
     "select_retriever",
     "select_asr_engine",
+    "select_final_refiner",
     "preload_asr",
     "probe_model_capability",
     "assemble_manager",
     "assemble_retrieval",
     "assemble_voice",
+    "assemble_project_mode",
     "assemble_screenshot_manager",
     "assemble_global_hotkeys",
     "build_input_router",
@@ -215,8 +238,9 @@ DIFY_STATE_DEGRADED: str = "degraded"
 # 见《5-语音输入与流式ASR》F8 交互一节
 VOICE_EMPTY_HINT: str = "识别失败，没有听到内容"
 
-# 语音开关的去抖窗口（秒）：界面 F8 与桌面快捷键可能为同一次按键各触发一次，
-# 窗口内的重复 toggle 直接丢掉，见 :meth:`MainState.toggle_voice_capture`。
+# 语音开关的去抖窗口（秒）：CLI 手动调用的 voice-toggle 与键盘自动重复
+# 可能连着触发，窗口内的重复 toggle 直接丢掉，
+# 见 :meth:`MainState.toggle_voice_capture`。
 # 用单调时钟计时，不会被系统时间调整影响。
 VOICE_TOGGLE_DEBOUNCE_SECONDS: float = 0.4
 
@@ -440,7 +464,7 @@ class MainState:
     """主进程当前的状态。
 
     状态字段的取值见《2-骨架与配置》状态字段取值表。
-    DEEPSEEK 字段由问题管理器的状态回调更新：请求发出前是 connecting，
+    MODEL 字段由问题管理器的状态回调更新：请求发出前是 connecting，
     收到第一个流式片段是 streaming，正常结束回到 idle，出错是 error。
 
     :param voice_toggle_debounce_seconds: 语音开关的去抖窗口（秒）。
@@ -459,8 +483,8 @@ class MainState:
         self.audio_on: bool = False
         self.asr_state: str = ASR_STATE_IDLE
         self.dify_state: str = DIFY_STATE_OFFLINE
-        # DEEPSEEK 字段，取值见《2-骨架与配置》状态字段取值表
-        self.deepseek_state: str = MODEL_STATE_IDLE
+        # MODEL 字段，取值见《2-骨架与配置》状态字段取值表
+        self.model_state: str = MODEL_STATE_IDLE
         self.ttft_ms: float | None = None
         # 最近一次语音识别出来的最终文本，空串表示还没有
         self.last_voice_text: str = ""
@@ -471,10 +495,18 @@ class MainState:
         self._config: AppConfig | None = None
         self._stop_requested: bool = False
         self._screenshot_manager: ScreenshotManager | None = None
-        self._client: MockClient | DeepSeekClient | None = None
+        self._client: MockClient | OpenAICompatClient | None = None
         self._retrieval: RetrievalChain | None = None
         self._voice: VoiceChain | None = None
         self._input_router: InputRouter | None = None
+        # 项目模式链路：双流转写控制器、对话日志与项目模式的问题提交回调，
+        # 见《5-语音输入与流式ASR》项目模式一节
+        self._project_controller: Any | None = None
+        self._dialogue_log: DialogueLog | None = None
+        self._project_submit: Callable[[str], Awaitable[None]] | None = None
+        self._project_submit_tasks: list[asyncio.Task[None]] = []
+        # 进入项目模式前 F10 绑的 action（普通模式是 reanalyze），退出时恢复
+        self._context_view_key_action: str | None = None
         # 语音开关去抖：窗口与上次 toggle 的时刻（单调时钟，单位秒）
         self._voice_toggle_debounce: float = max(
             0.0, float(voice_toggle_debounce_seconds)
@@ -484,8 +516,8 @@ class MainState:
         )
         self._last_voice_toggle_at: float | None = None
 
-    def set_deepseek_state(self, value: str) -> None:
-        """更新 DEEPSEEK 字段。
+    def set_model_state(self, value: str) -> None:
+        """更新 MODEL 字段。
 
         问题管理器在请求生命周期里往外报状态，这里把状态记下来，
         见《2-骨架与配置》状态字段取值表。
@@ -505,7 +537,7 @@ class MainState:
                 level="WARNING",
             )
             return
-        self.deepseek_state = value
+        self.model_state = value
         self._schedule_status_publish()
 
     def _schedule_status_publish(self) -> None:
@@ -534,7 +566,7 @@ class MainState:
         """
         self._config = config
 
-    def set_model_client(self, client: MockClient | DeepSeekClient) -> None:
+    def set_model_client(self, client: MockClient | OpenAICompatClient) -> None:
         """记住模型客户端，预热时用它探测模型。
 
         :param client: 模型客户端。
@@ -561,6 +593,29 @@ class MainState:
         :param router: 三种输入共用的输入路由器。
         """
         self._input_router = router
+
+    def attach_project_mode(
+        self,
+        controller: Any,
+        dialogue_log: DialogueLog,
+        submit: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """记住项目模式链路，socket 动作与 F8 分派靠它。
+
+        :param controller: 双流转写控制器。
+        :param dialogue_log: 对话日志，上下文视图与请求拼装的数据源。
+        :param submit: 项目模式的问题提交回调，参数是窗口内截取的问题文本。
+        """
+        self._project_controller = controller
+        self._dialogue_log = dialogue_log
+        self._project_submit = submit
+        log_event("main.project_mode.attached", "项目模式链路已挂到主进程状态上")
+
+    @property
+    def project_mode_running(self) -> bool:
+        """项目模式的双流转写是否开着，链路没装时是 False。"""
+        controller = self._project_controller
+        return controller is not None and controller.is_running()
 
     def set_screenshot_manager(self, screenshot_manager: ScreenshotManager) -> None:
         """记住截图管理器，界面起来之后由装配层塞进来。
@@ -693,8 +748,14 @@ class MainState:
         按住路径不走去抖：按键重复时靠 ``is_running`` 判断，
         不会在按住期间反复开流。
 
+        项目模式运行中 F8 的语义变成截取面试官问题：按下开始截取窗口，
+        不碰普通语音采集的那一套状态，
+        见《5-语音输入与流式ASR》项目模式一节。
+
         :returns: 动作结果，字段有 ``audio``、``asr``、``result``、``text`` 与 ``note``。
         """
+        if self.project_mode_running:
+            return await self._project_voice_start()
         voice = self._voice
         if voice is None:
             # 语音链路还没装好：没有采集可开关，状态字段不动
@@ -740,8 +801,14 @@ class MainState:
         没在采集时是空操作，直接返回忽略结果，不碰采集器；
         停止时的结果处理与切换路径共用 :meth:`_apply_voice_result`。
 
+        项目模式运行中 F8 的语义变成截取面试官问题：松开把窗口内的
+        面试官语句标成问题，问题非空时放后台走问题提交链，
+        见《5-语音输入与流式ASR》项目模式一节。
+
         :returns: 动作结果，字段有 ``audio``、``asr``、``result``、``text`` 与 ``note``。
         """
+        if self.project_mode_running:
+            return await self._project_voice_stop()
         voice = self._voice
         if voice is None or not voice.audio_manager.is_running:
             log_event(
@@ -766,6 +833,308 @@ class MainState:
             "text": self.last_voice_text,
             "note": _voice_note(result),
         }
+
+    # ------------------------------------------------------------------
+    # 项目模式，见《5-语音输入与流式ASR》项目模式一节
+    # ------------------------------------------------------------------
+    async def _project_voice_start(self) -> dict[str, Any]:
+        """项目模式下按下 F8：开始截取面试官问题的窗口。
+
+        只开截取窗口，不碰普通语音采集的状态字段；
+        窗口没在双流转写里起作用时控制器自己记日志忽略。
+
+        :returns: 动作结果，字段与普通模式的结构一致。
+        """
+        controller = self._project_controller
+        if controller is not None:
+            await controller.open_question_window()
+        return {
+            "audio": AUDIO_STATE_OFF,
+            "asr": self.asr_state,
+            "result": "started",
+            "text": "",
+            "note": "项目模式：开始截取面试官问题",
+        }
+
+    async def _project_voice_stop(self) -> dict[str, Any]:
+        """项目模式下松开 F8：窗口内的面试官语句标成问题并提交。
+
+        问题文本非空时放后台走问题提交链：提交回调会把对话日志
+        ``recent_text()`` 一并带给问题管理器，提交动作不等整条
+        模型流结束。窗口里没有面试官语句时不提交。
+
+        :returns: 动作结果，字段与普通模式的结构一致。
+        """
+        controller = self._project_controller
+        text = ""
+        if controller is not None:
+            text = (await controller.close_question_window()).strip()
+        if text:
+            self._spawn_project_submit(text)
+        return {
+            "audio": AUDIO_STATE_OFF,
+            "asr": self.asr_state,
+            "result": "stopped",
+            "text": text,
+            "note": (
+                "项目模式：面试官问题已提交"
+                if text
+                else "项目模式：窗口内没有面试官语句，不提交"
+            ),
+        }
+
+    def _spawn_project_submit(self, text: str) -> None:
+        """把项目模式的问题提交放后台跑，不占住按住停止的流程。
+
+        :param text: 窗口内截取的问题文本。
+        """
+        submit = self._project_submit
+        if submit is None:
+            log_event(
+                "main.project_mode.submit_unavailable",
+                "项目模式的提交回调还没装好，问题不提交",
+                level="WARNING",
+            )
+            return
+        _spawn_submit(lambda: submit(text), self._project_submit_tasks)
+
+    async def toggle_project_mode(self) -> dict[str, Any]:
+        """切换项目模式：没开就启动双流转写，开着就停掉。
+
+        启动成功后界面切到项目模式（状态栏、提示栏、双路临时区）
+        并把 F10 切到上下文视图；退出时恢复 F10 原绑定。
+        两路采集都没起来时视为启动失败，界面不切换，也不动键位。
+
+        :returns: 动作结果，字段有 ``result``、``running``，成功启动时带 ``session_id``。
+        """
+        controller = self._project_controller
+        if controller is None:
+            log_event(
+                "main.project_mode.unavailable",
+                "项目模式链路还没装好，忽略这次切换",
+                level="WARNING",
+            )
+            return {"result": "ignored", "running": False, "note": "项目模式链路还没装好"}
+        if controller.is_running():
+            await controller.stop()
+            self._apply_project_mode_ui(False)
+            return {"result": "stopped", "running": False}
+        await controller.start()
+        if not controller.is_running():
+            # 两路采集都没起来：控制器记了日志，这里不让界面切模式
+            return {
+                "result": "failed",
+                "running": False,
+                "note": "项目模式启动失败，原因见日志",
+            }
+        self._apply_project_mode_ui(True)
+        return {
+            "result": "started",
+            "running": True,
+            "session_id": controller.session_id or "",
+        }
+
+    def _apply_project_mode_ui(self, enabled: bool) -> None:
+        """把项目模式开关同步到界面：模式显示与 F10 键位一起切。
+
+        :param enabled: 是否进入项目模式。
+        """
+        controller = self._project_controller
+        app = self._app
+        if app is None:
+            return
+        setter = getattr(app, "set_project_mode", None)
+        if setter is not None:
+            session_id = controller.session_id if enabled else None
+            try:
+                setter(enabled, session_id=session_id)
+            except Exception as exc:
+                log_event(
+                    "main.project_mode.ui_failed",
+                    f"项目模式显示切换失败：{exc}",
+                    level="WARNING",
+                    error=str(exc),
+                )
+        self._toggle_context_view_key(app, enabled)
+
+    def _toggle_context_view_key(self, app: Any, enabled: bool) -> None:
+        """项目模式激活时把 F10 切到上下文视图，退出时恢复原绑定。
+
+        原绑定进入前记下来（普通模式是 reanalyze），退出时恢复。
+        动态换绑要对当前 screen 做才生效：Textual 的按键查找链里
+        screen 的绑定优先于 app 的绑定，只改 app 的绑定表时 screen 里
+        复制的旧绑定仍会先命中。界面自己维护的键位记录
+        （``hotkey_bindings``）一起同步，状态查询看到的与实际生效的
+        键位一致，见《5-语音输入与流式ASR》项目模式一节。
+
+        :param app: Textual 应用实例。
+        :param enabled: 是否进入项目模式。
+        """
+        key = "f10"
+        if enabled:
+            original = ""
+            bindings = getattr(app, "hotkey_bindings", None)
+            if isinstance(bindings, dict):
+                original = str(bindings.get(key) or "")
+            self._context_view_key_action = original or None
+            action = "toggle_context_view"
+        else:
+            original = self._context_view_key_action or "reanalyze"
+            self._context_view_key_action = None
+            action = original
+        self._bind_key_on_screen(app, key, action)
+        self._sync_hotkey_record(app, key, action)
+        if enabled:
+            log_event("main.project_mode.key", "F10 已切到上下文视图", context_view=True)
+        else:
+            log_event(
+                "main.project_mode.key",
+                "F10 已恢复原绑定",
+                context_view=False,
+                action=original,
+            )
+
+    @staticmethod
+    def _bind_key_on_screen(app: Any, key: str, action: str) -> None:
+        """把一个键换绑到 app 与当前 screen。
+
+        Textual 的按键查找链里 screen 的绑定优先，动态换绑要连 screen
+        的绑定表一起改。两点实现细节：
+
+        - screen 层的 action 用 ``app.`` 前缀：screen 级绑定的
+          namespace 是 screen 对象，而这些界面 action 方法都定义在
+          App 类上，不带前缀时 action 在 screen 上解析不到，
+          会落到 app 层绑定列表里的旧绑定；
+        - screen 层直接替换该键的绑定列表：``BindingsMap.bind`` 是
+          追加语义，进出项目模式反复切换会残留旧绑定，
+          先到先得会让恢复失效。
+
+        界面还没挂载时只绑 app，此时也没有按键要处理。
+
+        :param app: Textual 应用实例。
+        :param key: 键名。
+        :param action: 该键现在对应的 action 名。
+        """
+        app.bind(key, action, show=False)
+        try:
+            screen = app.screen
+        except Exception:
+            # 界面还没挂载，没有 screen 可绑
+            return
+        try:
+            from textual.binding import Binding
+
+            screen._bindings.key_to_bindings[key] = [
+                Binding(key, f"app.{action}", "", show=False)
+            ]
+            screen.refresh_bindings()
+        except Exception as exc:
+            log_event(
+                "main.project_mode.key_failed",
+                f"screen 级键位切换失败：{exc}",
+                level="WARNING",
+                error=str(exc),
+                key=key,
+                action=action,
+            )
+
+    @staticmethod
+    def _sync_hotkey_record(app: Any, key: str, action: str) -> None:
+        """把键位变化同步进界面自己维护的绑定记录。
+
+        记录字典不是 Textual 的绑定表，只是 ``hotkey_bindings`` 属性
+        背后的展示用快照；界面没有这个记录时跳过，不影响实际键位。
+
+        :param app: Textual 应用实例。
+        :param key: 键名。
+        :param action: 该键现在对应的 action 名。
+        """
+        record = getattr(app, "_hotkey_bindings", None)
+        if isinstance(record, dict):
+            record[key] = action
+
+    def toggle_context_view(self) -> dict[str, Any]:
+        """切换上下文视图，F10 在项目模式下的实际行为。
+
+        :returns: 动作结果，带切换后的视图状态。
+        """
+        app = self._app
+        action = (
+            getattr(app, "action_toggle_context_view", None)
+            if app is not None
+            else None
+        )
+        if action is None:
+            return {
+                "result": "ignored",
+                "context_view_open": False,
+                "note": "界面还没起来，没有上下文视图可切换",
+            }
+        try:
+            action()
+        except Exception as exc:
+            log_event(
+                "main.context_view.failed",
+                f"上下文视图切换失败：{exc}",
+                level="WARNING",
+                error=str(exc),
+            )
+            return {
+                "result": "failed",
+                "context_view_open": bool(getattr(app, "context_view_open", False)),
+                "note": str(exc),
+            }
+        return {
+            "result": "toggled",
+            "context_view_open": bool(getattr(app, "context_view_open", False)),
+        }
+
+    def clear_dialogue_context(self) -> dict[str, Any]:
+        """清空对话上下文，重开一轮：日志封存重开，界面跟着刷新。
+
+        :returns: 动作结果，带新会话 ID。
+        """
+        dialogue_log = self._dialogue_log
+        if dialogue_log is None:
+            return {
+                "result": "ignored",
+                "session_id": "",
+                "note": "对话日志还没装好",
+            }
+        session_id = dialogue_log.clear()
+        app = self._app
+        clearer = getattr(app, "clear_dialogue", None) if app is not None else None
+        if clearer is not None:
+            try:
+                clearer()
+            except Exception as exc:
+                log_event(
+                    "main.dialogue.clear_ui_failed",
+                    f"界面刷新失败：{exc}",
+                    level="WARNING",
+                    error=str(exc),
+                )
+        return {"result": "cleared", "session_id": session_id}
+
+    async def stop_project_mode(self) -> None:
+        """停掉项目模式的双流转写，收尾流程用。
+
+        没装链路或没在运行时是空操作；停不下来的异常吃掉只记日志，
+        不影响收尾的其余步骤。
+        """
+        controller = self._project_controller
+        if controller is None or not controller.is_running():
+            return
+        try:
+            await controller.stop()
+        except Exception as exc:
+            log_event(
+                "main.project_mode.stop_failed",
+                f"停止项目模式失败：{exc}",
+                level="WARNING",
+                error=str(exc),
+            )
+        self._apply_project_mode_ui(False)
 
     def _debounce_voice_toggle(self) -> dict[str, Any] | None:
         """把去抖窗口内的重复 toggle 丢掉。
@@ -848,7 +1217,7 @@ class MainState:
         """把当前状态发布到界面。
 
         界面只认完整快照：少一个字段就会被默认值覆盖掉，
-        所以这里拿界面上一次的快照打底，只改 AUDIO、ASR、DIFY、DEEPSEEK
+        所以这里拿界面上一次的快照打底，只改 AUDIO、ASR、DIFY、MODEL
         四个字段。提示位归界面管，按界面上的快照原样重发。
 
         :param fields: 要额外覆盖的字段。
@@ -916,7 +1285,7 @@ class MainState:
             "audio": AUDIO_STATE_ON if self.audio_on else AUDIO_STATE_OFF,
             "asr": self.asr_state,
             "dify": self.dify_state,
-            "deepseek": self.deepseek_state,
+            "model": self.model_state,
             "ttft_ms": self.ttft_ms,
             "hint": "",
         }
@@ -924,7 +1293,7 @@ class MainState:
         snapshot = getattr(app, "_status", None) if app is not None else None
         if isinstance(snapshot, dict):
             # 提示位归界面管，按界面上的快照原样重发；
-            # DEEPSEEK 归主进程管：问题管理器报的状态才是真的
+            # MODEL 归主进程管：问题管理器报的状态才是真的
             base = dict(snapshot)
             base.update(
                 {
@@ -932,7 +1301,7 @@ class MainState:
                     "audio": fields["audio"],
                     "asr": fields["asr"],
                     "dify": fields["dify"],
-                    "deepseek": fields["deepseek"],
+                    "model": fields["model"],
                     "ttft_ms": fields["ttft_ms"],
                 }
             )
@@ -951,7 +1320,7 @@ class MainState:
             "audio": AUDIO_STATE_ON if self.audio_on else AUDIO_STATE_OFF,
             "asr": self.asr_state,
             "dify": self.dify_state,
-            "deepseek": self.deepseek_state,
+            "model": self.model_state,
             "ttft": self.ttft_ms,
             "pid": os.getpid(),
             "metrics": metrics_payload(),
@@ -979,15 +1348,15 @@ class MainState:
         ``providers`` 指向 mock 的那一项不连真实服务，对应项给 mock 标记。
         """
         asr = await self._warmup_asr()
-        deepseek = await self._warmup_model()
+        model = await self._warmup_model()
         dify = await self._warmup_dify()
         devices = await self._warmup_devices()
         return {
             "asr": asr,
-            "deepseek": deepseek,
+            "model": model,
             "dify": dify,
             "devices": devices,
-            "note": f"ASR {asr}、模型 {deepseek}、Dify {dify}，设备列表刷新到 {devices} 台",
+            "note": f"ASR {asr}、模型 {model}、Dify {dify}，设备列表刷新到 {devices} 台",
         }
 
     async def _warmup_asr(self) -> str:
@@ -1017,7 +1386,7 @@ class MainState:
         """探测模型能力，顺便把 HTTP 连接建起来。
 
         失败只给 error，不抛异常，调用方只告警不退出；
-        DEEPSEEK 字段同步落到 error，与启动探测失败的处理一致。
+        MODEL 字段同步落到 error，与启动探测失败的处理一致。
         """
         client = self._client
         config = self._config
@@ -1034,7 +1403,7 @@ class MainState:
                 level="WARNING",
                 error=str(exc),
             )
-            self.set_deepseek_state(MODEL_STATE_ERROR)
+            self.set_model_state(MODEL_STATE_ERROR)
             return "error"
         return "ready"
 
@@ -1135,11 +1504,13 @@ class MainState:
 def build_handlers(state: MainState) -> dict[str, Callable[[Request], Any]]:
     """建 action 到 handler 的映射。
 
-    action 取值见《2-骨架与配置》进程通信一节：``voice-toggle``、``screenshot``、
-    ``stop``、``status``、``warmup``。handler 收到请求，返回值当作响应 payload。
+    action 取值见《2-骨架与配置》进程通信一节：``voice-toggle``、``voice-start``、
+    ``voice-stop``、``screenshot``、``project-mode-toggle``、``context-view-toggle``、
+    ``context-clear``、``stop``、``status``、``warmup``。
+    handler 收到请求，返回值当作响应 payload。
 
     分发入口只有一条：:class:`~app.inputs.global_command.GlobalCommandDispatcher`。
-    这里把五个动作注册进去，返回它给 socket 服务端用的 handler 映射；
+    这里把十个动作注册进去，返回它给 socket 服务端用的 handler 映射；
     未知动作由它兜住，不抛异常，见《8-集成与验收》全局快捷键一节。
 
     :param state: 主进程状态。
@@ -1152,16 +1523,59 @@ def build_handlers(state: MainState) -> dict[str, Callable[[Request], Any]]:
         """
         return await state.toggle_voice_capture()
 
+    async def handle_voice_start(request: Request) -> dict[str, Any]:
+        """按住语音键：开始语音采集。
+
+        AHK 的 F8 按下走这个动作，已在采集时忽略。
+        项目模式运行中按状态分派：双流转写开着时是截取窗口的按下，
+        见《5-语音输入与流式ASR》项目模式一节。
+        """
+        return await state.start_voice_capture()
+
+    async def handle_voice_stop(request: Request) -> dict[str, Any]:
+        """松开语音键：停止采集并冲刷最终文本提交。
+
+        AHK 的 F8 松开走这个动作，没在采集时空操作。
+        项目模式运行中按状态分派：双流转写开着时是截取窗口的松开，
+        见《5-语音输入与流式ASR》项目模式一节。
+        """
+        return await state.stop_voice_capture()
+
     async def handle_screenshot(request: Request) -> dict[str, Any]:
         """触发一次截图并提交。"""
         return await state.capture_screenshot()
 
+    async def handle_project_mode_toggle(request: Request) -> dict[str, Any]:
+        """切换项目模式：启动或停止双流转写。
+
+        AHK 的 F9 走这个动作，触发类动作由 socket 先回 ``accepted`` 回执，
+        见《5-语音输入与流式ASR》项目模式一节。
+        """
+        return await state.toggle_project_mode()
+
+    def handle_context_view_toggle(request: Request) -> dict[str, Any]:
+        """切换上下文视图。
+
+        AHK 的 F10（项目模式激活时）走这个动作，同步处理，
+        返回切换后的视图状态。
+        """
+        return state.toggle_context_view()
+
+    def handle_context_clear(request: Request) -> dict[str, Any]:
+        """清空对话上下文，重开一轮。
+
+        AHK 的 F11 走这个动作，同步处理，返回新会话 ID。
+        """
+        return state.clear_dialogue_context()
+
     async def handle_stop(request: Request) -> dict[str, Any]:
         """走收尾流程，退出主进程。
 
-        先停掉音频采集，再退出界面，见《2-骨架与配置》进程通信一节对 ``stop`` 的描述。
+        先停掉音频采集与项目模式，再退出界面，
+        见《2-骨架与配置》进程通信一节对 ``stop`` 的描述。
         """
         await state.stop_voice()
+        await state.stop_project_mode()
         state.request_stop()
         return {"stopping": True}
 
@@ -1175,7 +1589,12 @@ def build_handlers(state: MainState) -> dict[str, Callable[[Request], Any]]:
 
     dispatcher = GlobalCommandDispatcher()
     dispatcher.register(ACTION_VOICE_TOGGLE, handle_voice_toggle)
+    dispatcher.register(ACTION_VOICE_START, handle_voice_start)
+    dispatcher.register(ACTION_VOICE_STOP, handle_voice_stop)
     dispatcher.register(ACTION_SCREENSHOT, handle_screenshot)
+    dispatcher.register(ACTION_PROJECT_MODE_TOGGLE, handle_project_mode_toggle)
+    dispatcher.register(ACTION_CONTEXT_VIEW_TOGGLE, handle_context_view_toggle)
+    dispatcher.register(ACTION_CONTEXT_CLEAR, handle_context_clear)
     dispatcher.register(ACTION_STOP, handle_stop)
     dispatcher.register(ACTION_STATUS, handle_status)
     dispatcher.register(ACTION_WARMUP, handle_warmup)
@@ -1185,30 +1604,30 @@ def build_handlers(state: MainState) -> dict[str, Callable[[Request], Any]]:
 # ----------------------------------------------------------------------
 # 模型客户端与装配
 # ----------------------------------------------------------------------
-def select_client(config: AppConfig) -> MockClient | DeepSeekClient:
+def select_client(config: AppConfig) -> MockClient | OpenAICompatClient:
     """按 ``providers.llm`` 选模型客户端。
 
     ``mock`` 用本地假流客户端，不发网络请求；
-    ``deepseek`` 用真实客户端，API Key 取环境变量 ``DEEPSEEK_API_KEY``。
+    ``openai`` 用 OpenAI 兼容客户端，API Key 取环境变量 ``MODEL_API_KEY``。
 
     :param config: 应用配置。
     """
-    if config.providers.llm == "deepseek":
-        api_key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-        return DeepSeekClient(config, api_key)
+    if config.providers.llm == "openai":
+        api_key = (os.environ.get("MODEL_API_KEY") or "").strip()
+        return OpenAICompatClient(config, api_key)
     return MockClient(config)
 
 
 async def probe_model_capability(
-    client: MockClient | DeepSeekClient,
+    client: MockClient | OpenAICompatClient,
     config: AppConfig,
 ) -> ProbeResult:
     """探测模型能力，对应 ``start`` 的第 7 步。
 
     ``providers.llm=mock`` 时不连网络，只说明用的是 mock；
-    ``deepseek`` 时真的探测一次，失败只给结果不抛异常，调用方只告警不退出。
-    失败时的错误码是 ``E_DEEPSEEK_AUTH``、``E_DEEPSEEK_TIMEOUT``
-    或 ``E_DEEPSEEK_STREAM``。
+    ``openai`` 时真的探测一次，失败只给结果不抛异常，调用方只告警不退出。
+    失败时的错误码是 ``E_MODEL_AUTH``、``E_MODEL_TIMEOUT``
+    或 ``E_MODEL_STREAM``。
 
     探测结果只用于展示：detail 里带上模型支不支持 image 模态，
     客户端不因缺少 ``image`` 而拒绝截图，见《4-截图输入与多模态》模型视觉能力一节。
@@ -1226,7 +1645,7 @@ async def probe_model_capability(
     except InterviewMateError as exc:
         return ProbeResult(ok=False, detail=exc.message, code=exc.code)
     except Exception as exc:
-        return ProbeResult(ok=False, detail=str(exc), code="E_DEEPSEEK_STREAM")
+        return ProbeResult(ok=False, detail=str(exc), code="E_MODEL_STREAM")
     supports_image = "是" if capability.supports_image else "否"
     return ProbeResult(
         ok=True,
@@ -1236,7 +1655,7 @@ async def probe_model_capability(
 
 def assemble_manager(
     config: AppConfig,
-    client: MockClient | DeepSeekClient,
+    client: MockClient | OpenAICompatClient,
     app: Any,
     *,
     retrieve: RetrievalFunc | None = None,
@@ -1257,7 +1676,7 @@ def assemble_manager(
     见《7-代码问题模式》纯代码块兜底一节。
 
     给了主进程状态时，问题管理器的模型状态回调接到它身上：
-    DEEPSEEK 字段跟着请求生命周期走，不再写死，
+    MODEL 字段跟着请求生命周期走，不再写死，
     见《2-骨架与配置》状态字段取值表。
 
     ``providers.llm`` 不是 mock 时装配模型题型判定器并注入问题管理器；
@@ -1282,9 +1701,9 @@ def assemble_manager(
     # 题型与检索需求改由模型判定：mock 模式只走同步规则，不发网络请求；
     # 真实客户端失败或超时时问题管理器回退同步规则，
     # 见《3-文本输入与流式回答》题型判定一节
-    llm_classifier: DeepSeekQuestionClassifier | None = None
+    llm_classifier: OpenAICompatQuestionClassifier | None = None
     if config.providers.llm != "mock":
-        llm_classifier = DeepSeekQuestionClassifier(client)  # type: ignore[arg-type]
+        llm_classifier = OpenAICompatQuestionClassifier(client)  # type: ignore[arg-type]
 
     def _parser_factory(request_id: str, session_id: str) -> StreamParser:
         """按请求新建解析器，每个请求用各自的解析器。"""
@@ -1300,7 +1719,7 @@ def assemble_manager(
         retrieve=retrieve,
         on_sources=on_sources,
         on_coding_mode=dispatcher.set_coding_mode,
-        on_model_state=state.set_deepseek_state if state is not None else None,
+        on_model_state=state.set_model_state if state is not None else None,
         llm_classifier=llm_classifier,
     )
     app.attach_manager(manager)
@@ -1487,10 +1906,12 @@ def assemble_global_hotkeys(
 ) -> HotkeyListener | None:
     """把全局热键监听装到主进程上。
 
-    全局热键由 AutoHotkey v2 触发，终端失焦时也能收到按键。F8 按一次
-    开始采集，再按一次停止并提交；F9 按一次截屏。界面被标记之后
-    自己的 F8 与 F9 动作会短路，同一次按键不会处理两遍，
-    见《5-语音输入与流式ASR》F8 交互一节。
+    全局热键由 AutoHotkey v2 触发，终端失焦时也能收到按键。F8 按住说话：
+    按下开始采集，松开停止并提交最终文本；F7 按一次截屏。界面被标记之后
+    自己的截图动作会短路（F8 不在界面绑定），同一次按键不会处理两遍，
+    见《5-语音输入与流式ASR》F8 交互一节。F9/F10/F11 是项目模式的
+    project-mode-toggle / context-view-toggle / context-clear，由 socket
+    的动作分发处理，不在全局热键监听里绑。
 
     键名取配置里的 ``hotkeys.voice_toggle`` 与 ``hotkeys.screenshot``，
     归一成小写后作为绑定表的键。两项配成同一个键属于配置写错：
@@ -1510,18 +1931,12 @@ def assemble_global_hotkeys(
     active_provider = provider if provider is not None else get_platform().hotkeys
     voice_key = config.hotkeys.voice_toggle.strip().lower()
     screenshot_key = config.hotkeys.screenshot.strip().lower()
-    # F8 与 voice-toggle 一致采用切换语义：按一次开始，再按一次停止并提交。
-    toggle_voice = getattr(state, "toggle_voice_capture", None)
-    if callable(toggle_voice):
-        voice_handlers = HotkeyHandlers(
-            on_press=_hotkey_action(toggle_voice, voice_key, "toggle"),
-        )
-    else:
-        # 调用方没有切换入口时退回按下开始、松开停止，保持兼容
-        voice_handlers = HotkeyHandlers(
-            on_press=_hotkey_action(state.start_voice_capture, voice_key, "press"),
-            on_release=_hotkey_action(state.stop_voice_capture, voice_key, "release"),
-        )
+    # F8 按住说话：按下开始采集，松开停止并提交最终文本，
+    # 与 socket 的 voice-start/voice-stop 走同一条按住路径。
+    voice_handlers = HotkeyHandlers(
+        on_press=_hotkey_action(state.start_voice_capture, voice_key, "press"),
+        on_release=_hotkey_action(state.stop_voice_capture, voice_key, "release"),
+    )
     bindings: dict[str, HotkeyHandlers] = {voice_key: voice_handlers}
     if screenshot_key == voice_key:
         log_event(
@@ -1536,17 +1951,18 @@ def assemble_global_hotkeys(
         )
     listener = HotkeyListener(active_provider, bindings, loop=loop)
     if not listener.start():
-        # 提供者不可用或启动出错：界面绑定保持原来的切换语义
+        # 提供者不可用或启动出错：F8 由 AHK 脚本处理，界面没有语音绑定，
+        # 这里只提示监听没起来，见《5-语音输入与流式ASR》F8 交互一节
         log_event(
             "main.hotkeys.unavailable",
-            "全局热键不可用，F8 与 F9 仍由界面处理",
+            "全局热键监听不可用，截图键仍由界面处理",
             level="WARNING",
         )
         return listener
     app.mark_global_hotkeys_active()
     log_event(
         "main.hotkeys.active",
-        "全局热键已接管按键，界面不再处理 F8 与 F9",
+        "全局热键已接管按键，界面不再处理 F8 与截图键",
         voice_key=voice_key,
         screenshot_key=screenshot_key,
     )
@@ -1835,14 +2251,44 @@ def select_asr_engine(config: AppConfig) -> AsrEngine:
     引擎的初始化超时显式给配置里的 ``asr.init_timeout``，
     进程级配置只当兜底，见《8-集成与验收》超时管理一节。
 
+    本地模型目录显式给仓库内的 ``models/``，与 ``scripts/verify_asr_models.py``
+    一样支持 ``INTERVIEWMATE_MODELS`` 覆盖；不给的话引擎会回落到 ``~/models``，
+    那里通常没有模型，加载只会报一句「model '...' is not registered」。
+
     :param config: 应用配置。
     """
     if config.providers.asr != "funasr":
         return _MockAsrEngine()
     return FunASREngine(
+        model_dir=os.environ.get("INTERVIEWMATE_MODELS") or str(REPO_ROOT / "models"),
         asr_model=config.asr.model,
         device=config.asr.device,
         vad_enabled=config.asr.vad_enabled,
+        init_timeout=config.asr.init_timeout,
+    )
+
+
+def select_final_refiner(config: AppConfig) -> SenseVoiceEngine | None:
+    """按 ``providers.asr`` 选最终文本重识别器。
+
+    ``funasr`` 用本地 SenseVoiceSmall 引擎，模型第一次用时加载；
+    ``mock`` 返回 None，语音与项目模式都不重识别，
+    最终文本就是流式结果。
+
+    重识别模型与流式引擎同时驻留显存约 3.5 GB（8 GB 显存可容纳）；
+    加载失败只告警降级，不阻断主进程，
+    见《5-语音输入与流式ASR》「重识别与热词纠正」一节。
+
+    语音链路与项目模式共用同一个实例：整段识别无内部状态，
+    模型只加载一次。
+
+    :param config: 应用配置。
+    """
+    if config.providers.asr != "funasr":
+        return None
+    return SenseVoiceEngine(
+        model_dir=os.environ.get("INTERVIEWMATE_MODELS") or str(REPO_ROOT / "models"),
+        device=config.asr.device,
         init_timeout=config.asr.init_timeout,
     )
 
@@ -1851,6 +2297,7 @@ async def preload_asr(
     config: AppConfig,
     engine: AsrEngine,
     state: MainState | None = None,
+    refiner: SenseVoiceEngine | None = None,
 ) -> str:
     """按配置预加载 ASR 模型，对应 ``start`` 的第 9 步。
 
@@ -1860,9 +2307,14 @@ async def preload_asr(
     引擎按 ``providers.asr`` 选真实实现，不用假引擎顶替；
     预加载与语音链路共用同一个实例，模型只加载一次。
 
+    流式引擎加载成功后顺带预热重识别模型：两个模型同时驻留显存约
+    3.5 GB，第一次松开 F8 时重识别不必现加载；失败只记 WARNING，
+    不影响 ASR 状态。
+
     :param config: 应用配置。
     :param engine: ASR 引擎。
     :param state: 主进程状态，ASR 字段由它发布。
+    :param refiner: 最终文本重识别器，None 时跳过预热。
     :returns: 预加载之后的 ASR 状态。
     """
     if not config.asr.enabled or not config.asr.preload:
@@ -1896,6 +2348,23 @@ async def preload_asr(
         state.asr_state = asr_state
         await state.publish_status()
     log_event("main.asr.preloaded", "ASR 预加载完成", asr_state=asr_state)
+    if refiner is not None:
+        try:
+            await refiner.ensure_loaded()
+        except Exception as exc:
+            log_event(
+                "main.asr.refiner_preload_failed",
+                f"重识别模型预热失败，最终文本将退回流式结果：{exc}",
+                level="WARNING",
+                error=str(exc),
+                code="E_ASR_LOAD",
+            )
+        else:
+            log_event(
+                "main.asr.refiner_preloaded",
+                "重识别模型预热完成",
+                device=refiner.device,
+            )
     return asr_state
 
 
@@ -1932,6 +2401,7 @@ def assemble_voice(
     engine: AsrEngine | None = None,
     factory: CaptureFactory | None = None,
     router: InputRouter | None = None,
+    refiner: SenseVoiceEngine | None = None,
 ) -> VoiceChain:
     """装配语音链路：采集器、ASR 引擎与最终文本的自动提交。
 
@@ -1947,9 +2417,10 @@ def assemble_voice(
 
     采集在事件循环里跑：开流与喂模型都不占住调用方。
 
-    界面按 F8 与 socket 的 ``voice-toggle`` 走同一条路：把主进程状态的
-    ``toggle_voice_capture`` 挂到界面上，正在采集就停止并提交最终文本，
-    没在采集就开始采集，见《5-语音输入与流式ASR》F8 交互一节。
+    界面按 F8 与 socket 的按住动作走同一条路：F8 的按下与松开由
+    AHK 全局热键经 socket 的 ``voice-start`` / ``voice-stop`` 送到主进程，
+    采集启停、状态发布与最终文本提交都走主进程状态这一份实现，
+    见《5-语音输入与流式ASR》F8 交互一节。
 
     :param config: 应用配置。
     :param app: Textual 应用实例，部分结果送给它。
@@ -1958,6 +2429,9 @@ def assemble_voice(
     :param engine: ASR 引擎，None 时按 ``providers.asr`` 选。
     :param factory: 采集器工厂，None 时按当前平台的音频后端造。
     :param router: 输入路由器，None 时现造一个。
+    :param refiner: 最终文本重识别器，None 时不重识别，最终文本就是
+        流式结果；给了的话停止采集时用整段录音重识别加热词纠正产出
+        最终文本，见《5-语音输入与流式ASR》「重识别与热词纠正」一节。
     :returns: 装配好的语音链路。
     """
     submit_tasks: list[asyncio.Task[None]] = []
@@ -2018,16 +2492,14 @@ def assemble_voice(
         _on_final_text,
         source=config.audio.source,
         on_partial_text=_on_partial_text,
+        final_refiner=refiner,
         init_timeout=config.audio.init_timeout,
     )
     hotkey = HotkeyController(audio_manager)
     if state is not None:
-        # 界面按 F8 接到 socket 的 voice-toggle 同一条路上：
-        # 采集启停、状态发布与最终文本提交都走主进程状态这一份实现
+        # 按住语义的采集启停、状态发布与最终文本提交都走主进程状态这一份实现；
+        # F8 的按下与松开由 AHK 全局热键经 socket 送到这里，界面不再绑定 F8
         state.set_input_router(active_router)
-        attach = getattr(app, "attach_voice_toggle", None)
-        if attach is not None:
-            attach(state.toggle_voice_capture)
     return VoiceChain(
         audio_manager=audio_manager,
         hotkey=hotkey,
@@ -2038,10 +2510,84 @@ def assemble_voice(
     )
 
 
+def assemble_project_mode(
+    config: AppConfig,
+    app: Any,
+    manager: QuestionManager,
+    *,
+    state: MainState | None = None,
+    refiner: SenseVoiceEngine | None = None,
+) -> tuple[DialogueLog, ProjectModeController]:
+    """装配项目模式：对话日志、双流转写控制器与问题提交回调。
+
+    三样东西：
+
+    - :class:`DialogueLog`：双流句子按句落库，``logs/dialogues`` 下
+      每个会话一个 md 文件；
+    - :class:`~app.audio.project_mode.ProjectModeController`：两路各自一个
+      独立的 FunASR 引擎实例（流式模型内部有 cache 状态，两路混喂同一实例
+      会串流），采集走平台 WASAPI 后端；部分结果与定稿句经事件总线发给
+      界面的双路临时区；
+    - 对话日志全文挂给界面的上下文视图（``attach_text_provider``），
+      F10 打开时现取一次。
+
+    项目模式的问题提交回调：窗口内截取的问题文本显示到右栏顶部，
+    并把对话日志 ``recent_text()`` 作为 ``dialogue_context`` 传给问题
+    管理器，user 消息按「对话日志 → 本轮问题 → 检索内容」的顺序拼装，
+    见《5-语音输入与流式ASR》项目模式一节。
+
+    :param config: 应用配置。
+    :param app: Textual 应用实例，数据源与显示切换都走它。
+    :param manager: 问题管理器，项目模式的问题提交到它。
+    :param state: 主进程状态，None 时只装配不挂到状态上。
+    :param refiner: 最终文本重识别器，None 时不重识别，落库文本就是
+        流式结果；给了的话每句落库前用整段句音频重识别加热词纠正，
+        见《5-语音输入与流式ASR》「重识别与热词纠正」一节。
+        与语音链路共用同一个实例。
+    :returns: ``(对话日志, 双流转写控制器)``。
+    """
+    dialogue_log = DialogueLog()
+    controller = ProjectModeController(
+        config=config,
+        dialogue_log=dialogue_log,
+        event_bus=getattr(app, "bus", None),
+        refiner=refiner,
+    )
+    text_provider = getattr(app, "attach_text_provider", None)
+    if text_provider is not None:
+        try:
+            text_provider(lambda: dialogue_log.full_text)
+        except Exception as exc:
+            # 界面还没挂载时上下文视图取不到：数据源已记在界面上，
+            # 挂载后的刷新走它自己的路径，装配不因此失败
+            log_event(
+                "main.project_mode.text_provider_failed",
+                f"上下文数据源挂到界面失败：{exc}",
+                level="WARNING",
+                error=str(exc),
+            )
+
+    async def _submit_project_question(text: str) -> None:
+        """项目模式的问题提交：题面显示到右栏，带日志上下文交给问题管理器。
+
+        提交语义等同用户手动输入了这个问题；对话日志取提交那一刻的
+        最近 ``rag.max_context_chars`` 个字符，见《5-语音输入与流式ASR》
+        项目模式一节。
+        """
+        _show_question(app, text)
+        await manager.submit_text(
+            text, None, dialogue_context=dialogue_log.recent_text()
+        )
+
+    if state is not None:
+        state.attach_project_mode(controller, dialogue_log, _submit_project_question)
+    return dialogue_log, controller
+
+
 def _show_question(app: Any, text: str) -> None:
     """把题面显示到右栏顶部。
 
-    语音最终文本与手动输入提交走同一个入口，
+    语音最终文本、手动输入与项目模式的问题提交走同一个入口，
     见《5-语音输入与流式ASR》F8 交互一节。
     界面没有这个方法时只记日志，不抛异常，也不让语音提交失败。
 
@@ -2135,7 +2681,7 @@ def _voice_note(result: str) -> str:
     return notes.get(result, result)
 
 
-async def close_client(client: MockClient | DeepSeekClient) -> None:
+async def close_client(client: MockClient | OpenAICompatClient) -> None:
     """关闭模型客户端，主进程收尾时调用。
 
     关不掉只记日志，不影响退出码。
@@ -2378,8 +2924,8 @@ async def run_main(config: AppConfig) -> int:
             code=capability.code,
             detail=capability.detail,
         )
-        # 探测失败时状态栏的 DEEPSEEK 落到 error，见《2-骨架与配置》状态字段取值表
-        state.set_deepseek_state(MODEL_STATE_ERROR)
+        # 探测失败时状态栏的 MODEL 落到 error，见《2-骨架与配置》状态字段取值表
+        state.set_model_state(MODEL_STATE_ERROR)
 
     # 检索链路，界面起来之后与问题管理器一起装
     retrieval: RetrievalChain | None = None
@@ -2392,7 +2938,12 @@ async def run_main(config: AppConfig) -> int:
     # 见《2-骨架与配置》命令行入口一节第 9 步。
     # 引擎在这里造一次，语音链路复用同一个实例，模型只加载一次
     asr_engine = select_asr_engine(config)
-    asr_preload_task = asyncio.create_task(preload_asr(config, asr_engine, state))
+    # 重识别模型与流式引擎共用一个实例：整段识别无内部状态，模型只加载一次。
+    # 预热在流式引擎加载完成后进行，失败只告警，最终文本退回流式结果
+    refiner = select_final_refiner(config)
+    asr_preload_task = asyncio.create_task(
+        preload_asr(config, asr_engine, state, refiner=refiner)
+    )
 
     async def _assemble(_pilot: Any) -> None:
         """界面起来之后装配问题管理器、检索、语音与截图管理器。
@@ -2421,6 +2972,7 @@ async def run_main(config: AppConfig) -> int:
             state=state,
             engine=asr_engine,
             router=router,
+            refiner=refiner,
         )
         state.set_voice_chain(voice)
         screenshot_manager = assemble_screenshot_manager(
@@ -2432,6 +2984,9 @@ async def run_main(config: AppConfig) -> int:
         state.set_screenshot_manager(screenshot_manager)
         # 手工输入回车也走路由器
         app.attach_input_router(router)
+        # 项目模式：对话日志、双流转写控制器与问题提交回调，
+        # 见《5-语音输入与流式ASR》项目模式一节
+        assemble_project_mode(config, app, manager, state=state, refiner=refiner)
         # 全局热键最后接上：路由与截图管理器都就绪了，按下时链路已经能跑，
         # 见《5-语音输入与流式ASR》F8 交互一节
         hotkey_listener = assemble_global_hotkeys(config, state, app)
@@ -2466,6 +3021,9 @@ async def run_main(config: AppConfig) -> int:
         # 停采集并冲刷 ASR 流：AudioManager.stop() 会先停采集再结束识别流，
         # HTTP 客户端才能随后关掉
         await state.stop_voice()
+        # 项目模式还在跑时先停掉：截取窗口补关、两路采集与引擎收尾，
+        # 见《5-语音输入与流式ASR》项目模式一节
+        await state.stop_project_mode()
         # ASR 还在加载时收尾：取消模型加载任务，不留悬挂的任务
         if not asr_preload_task.done():
             asr_preload_task.cancel()
@@ -2501,7 +3059,7 @@ async def start_process(
     建事件循环 → 建 socket 并监听 → 初始化模型客户端并探测能力（只告警）→
     启动界面 → 退出时收尾。
 
-    ``providers.llm=deepseek`` 时缺 ``DEEPSEEK_API_KEY`` 以退出码 3 结束；
+    ``providers.llm=openai`` 时缺 ``MODEL_API_KEY`` 以退出码 3 结束；
     ``providers.llm=mock`` 时不查这个变量，缺了照常启动。
 
     :param config_path: 配置文件路径，None 时用仓库根的 ``config/config.yaml``。
@@ -2545,8 +3103,8 @@ async def start_process(
         return EXIT_CONFIG_ERROR
 
     # 必填环境变量只在 providers.llm 指向真实实现时检查：
-    # mock 模式缺 DEEPSEEK_API_KEY 照常启动，见《2-骨架与配置》命令行入口一节第 1 步
-    if config.providers.llm == "deepseek":
+    # mock 模式缺 MODEL_API_KEY 照常启动，见《2-骨架与配置》命令行入口一节第 1 步
+    if config.providers.llm == "openai":
         missing_env = missing_required_env(env_file)
         if missing_env:
             names = "、".join(missing_env)

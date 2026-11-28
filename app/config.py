@@ -6,8 +6,8 @@
 环境变量约定见《2-骨架与配置》环境变量一节：环境变量覆盖配置文件里的同名项。
 本轮映射有对应配置项的五个变量：
 
-- ``DEEPSEEK_BASE_URL`` → ``deepseek.base_url``
-- ``DEEPSEEK_MODEL`` → ``deepseek.model``
+- ``MODEL_BASE_URL`` → ``model.base_url``
+- ``MODEL_NAME`` → ``model.name``
 - ``DIFY_BASE_URL`` → ``dify.base_url``
 - ``DIFY_DATASET_ID`` → ``dify.dataset_id``
 - ``DIFY_DATASET_API_KEY`` → ``dify.api_key``
@@ -41,7 +41,7 @@ __all__ = [
     "AudioSettings",
     "ASRSettings",
     "ScreenshotSettings",
-    "DeepSeekSettings",
+    "ModelSettings",
     "RagSettings",
     "DifySettings",
     "CodingSettings",
@@ -53,7 +53,7 @@ __all__ = [
     "missing_required_env",
     "REQUIRED_ENV",
     "OPTIONAL_ENV",
-    "RETIRED_DEEPSEEK_MODELS",
+    "RETIRED_MODEL_NAMES",
     "ENV_OVERRIDES",
     "REPO_ROOT",
     "DEFAULT_CONFIG_PATH",
@@ -67,15 +67,15 @@ DEFAULT_CONFIG_PATH: Path = REPO_ROOT / "config" / "config.yaml"
 DEFAULT_ENV_FILE: Path = REPO_ROOT / ".env"
 
 # 必填环境变量：缺任一项时 CLI 以退出码 3 结束，见《2-骨架与配置》命令行入口一节
-REQUIRED_ENV: tuple[str, ...] = ("DEEPSEEK_API_KEY",)
+REQUIRED_ENV: tuple[str, ...] = ("MODEL_API_KEY",)
 
 # 可选环境变量：当前配置结构里没有对应顶层段，只作为常量暴露
 # DIFY_BASE_URL / DIFY_DATASET_ID / DIFY_DATASET_API_KEY 已经有对应的 dify 段，
 # 移进 ENV_OVERRIDES，这里暂时是空的
 OPTIONAL_ENV: tuple[str, ...] = ()
 
-# 已退役的模型名，见《接口契约》DeepSeek 模型标识与基址一节
-RETIRED_DEEPSEEK_MODELS: tuple[str, ...] = (
+# 已退役的模型名，见《接口契约》模型标识与基址一节
+RETIRED_MODEL_NAMES: tuple[str, ...] = (
     "deepseek-v4-flash-vision-exp",
     "deepseek-v4-flash",
     "deepseek-chat",
@@ -84,8 +84,8 @@ RETIRED_DEEPSEEK_MODELS: tuple[str, ...] = (
 
 # 环境变量到配置项的映射：(环境变量名) -> (配置顶层段, 段内键)
 ENV_OVERRIDES: dict[str, tuple[str, str]] = {
-    "DEEPSEEK_BASE_URL": ("deepseek", "base_url"),
-    "DEEPSEEK_MODEL": ("deepseek", "model"),
+    "MODEL_BASE_URL": ("model", "base_url"),
+    "MODEL_NAME": ("model", "name"),
     "DIFY_BASE_URL": ("dify", "base_url"),
     "DIFY_DATASET_ID": ("dify", "dataset_id"),
     "DIFY_DATASET_API_KEY": ("dify", "api_key"),
@@ -198,15 +198,15 @@ class ScreenshotSettings(BaseModel):
     timeout: int = Field(default=150, gt=0)
 
 
-class DeepSeekSettings(BaseModel):
-    """DeepSeek 接口参数。"""
+class ModelSettings(BaseModel):
+    """模型接口参数。"""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     base_url: str = Field(min_length=1)
-    model: str = Field(min_length=1)
+    name: str = Field(min_length=1)
     stream: bool
-    # thinking 与 reasoning_effort 的取值见《接口契约》DeepSeek 思考模式与推理强度一节
+    # thinking 与 reasoning_effort 的取值见《接口契约》模型思考模式与推理强度一节
     thinking: Literal["enabled", "disabled"]
     reasoning_effort: Literal["low", "high", "max"]
     temperature: float = Field(ge=0, le=2)
@@ -215,14 +215,14 @@ class DeepSeekSettings(BaseModel):
     read_timeout: int = Field(gt=0)
     max_retries: int = Field(ge=0)
 
-    @field_validator("model")
+    @field_validator("name")
     @classmethod
     def _reject_retired_models(cls, value: str) -> str:
-        # 见《接口契约》DeepSeek 模型标识与基址一节
-        if value in RETIRED_DEEPSEEK_MODELS:
+        # 见《接口契约》模型标识与基址一节
+        if value in RETIRED_MODEL_NAMES:
             raise ValueError(
                 f"模型名 {value!r} 已退役，不能用于配置。"
-                f"被拒绝的模型名：{'、'.join(RETIRED_DEEPSEEK_MODELS)}"
+                f"被拒绝的模型名：{'、'.join(RETIRED_MODEL_NAMES)}"
             )
         return value
 
@@ -284,13 +284,13 @@ class PrivacySettings(BaseModel):
 class ProviderSettings(BaseModel):
     """各外部能力的实现选择。
 
-    默认走真实实现（deepseek/dify/funasr/mss）；测试与本地开发改成
+    默认走真实实现（openai/dify/funasr/mss）；测试与本地开发改成
     mock，对应实现不连真实服务、不加载模型、不抓真实屏幕。
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    llm: Literal["mock", "deepseek"]
+    llm: Literal["mock", "openai"]
     retrieval: Literal["mock", "dify"]
     asr: Literal["mock", "funasr"]
     # 截图实现名：mock 不做真实截图，mss 是 Windows 侧的 mss 实现，
@@ -309,7 +309,7 @@ class AppConfig(BaseModel):
     audio: AudioSettings
     asr: ASRSettings
     screenshot: ScreenshotSettings
-    deepseek: DeepSeekSettings
+    model: ModelSettings
     rag: RagSettings
     # Dify 连接参数的默认值来自 DifySettings 自身，配置文件里没写也能加载
     dify: DifySettings = Field(default_factory=DifySettings)

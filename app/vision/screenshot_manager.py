@@ -9,7 +9,7 @@
 - 本模块只管拿到图并提交，语音文字的合并不在这里做，
   合并发生在 QuestionManager 里，见《4-截图输入与多模态》与语音合并一节；
 - 截图失败只写状态栏提示位，错误码 ``E_SCREENSHOT``，
-  程序继续运行，不退出，也不改状态栏的 DEEPSEEK 字段；
+  程序继续运行，不退出，也不改状态栏的 MODEL 字段；
 - 截图照常采集、照常提交，不按模型支不支持图片分叉：
   本项目固定用配置里的模型，它声明支持 image 模态，
   见《4-截图输入与多模态》模型视觉能力一节。
@@ -57,6 +57,10 @@ CAPTURE_LATENCY_METRIC: str = "capture_latency"
 
 # 截图失败的错误码，复用核心层异常上的取值，见《2-骨架与配置》错误码一节
 SCREENSHOT_ERROR_CODE: str = ScreenshotError.code
+
+# 写状态栏提示位的最长等待（秒）。界面忙时提示位可能迟迟不回，
+# 不能让它把截图采集一起拖住，超时只记日志并继续采集。
+HINT_TIMEOUT_SECONDS: float = 1.0
 
 
 class ScreenshotManager:
@@ -119,6 +123,7 @@ class ScreenshotManager:
         :returns: 提交成功返回 True；任何一步失败返回 False。
         """
         router = self._router
+
         if router is not None:
             router.screenshot_started()
         try:
@@ -148,6 +153,7 @@ class ScreenshotManager:
         try:
             # 只包住后端采集这一步，图片处理与编码不计入采集耗时
             with timer:
+
                 screenshot = await asyncio.wait_for(
                     self._backend.capture(
                         target=self._config.screenshot.target,
@@ -168,6 +174,7 @@ class ScreenshotManager:
             self._log_capture_latency(timer.elapsed_ms, failed=True, error=_first_line(exc))
             return False
         self._log_capture_latency(timer.elapsed_ms, failed=False)
+
 
         try:
             processed = self._processor.process(screenshot.data)
@@ -232,7 +239,15 @@ class ScreenshotManager:
             )
             return
         try:
-            await publisher(hint)
+            # 界面忙时提示位可能长时间不回，限时等待后继续采集
+            await asyncio.wait_for(publisher(hint), HINT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            log_event(
+                "vision.screenshot.hint_timeout",
+                f"写提示位超时（{HINT_TIMEOUT_SECONDS:g} 秒），截图流程继续",
+                level="WARNING",
+                timeout=HINT_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
             # 提示写不出去不影响截图流程
             log_event(

@@ -10,7 +10,7 @@
 - 格式按配置取 PNG 或 WebP，默认 PNG，PNG 对文字与代码的呈现更稳；
 - 处理完的数据只在内存里，不写文件。
 
-体积上限见《接口契约》DeepSeek 图片输入限制一节：单边不超过 8192 像素，
+体积上限见《接口契约》模型图片输入限制一节：单边不超过 8192 像素，
 单图不超过 32 MiB，整个请求体不超过 48 MiB。体积按编码后的字节数算，
 因为 base64 会让体积增加约三分之一。
 """
@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 
-# 单边像素上限，见《接口契约》DeepSeek 图片输入限制一节
+# 单边像素上限，见《接口契约》模型图片输入限制一节
 MAX_EDGE_LIMIT: int = 8192
 # 单图上限 32 MiB，同上
 MAX_IMAGE_BYTES: int = 32 * 1024 * 1024
@@ -111,7 +111,7 @@ class ImageProcessor:
         """把截图原始字节处理成可提交的图片。
 
         流程：解开字节 → 按比例压长边 → 编码 → 校验单边、单图体积与请求体体积，
-        详见《4-截图输入与多模态》图片处理一节与《接口契约》DeepSeek 图片输入限制一节。
+        详见《4-截图输入与多模态》图片处理一节与《接口契约》模型图片输入限制一节。
         全程只在内存里处理，不写任何文件。
 
         :param raw: 截图原始字节，通常是 PNG。
@@ -126,7 +126,7 @@ class ImageProcessor:
 
             if max(image.size) > MAX_EDGE_LIMIT:
                 # 配置的 max_edge 大于硬上限，按硬上限等比重采样后重新编码，
-                # 见《接口契约》DeepSeek 图片输入限制一节
+                # 见《接口契约》模型图片输入限制一节
                 image = self._resize_to(image, MAX_EDGE_LIMIT)
                 data, mime = self._encode(image)
                 if max(image.size) > MAX_EDGE_LIMIT:

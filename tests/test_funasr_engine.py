@@ -4,7 +4,7 @@
 「FunASR 模型」「流式推理」「部分结果与最终结果」与《接口契约》
 「FunASR 音频块参数」几节要求的行为：
 
-- 200 毫秒的块攒够 600 毫秒才调一次模型；
+- 200 毫秒的块攒满 200 毫秒（3200 点）就调一次模型，不满一块先攒着；
 - 推理参数按契约传，``cache`` 同一条流内共用、不同流之间不共享；
 - 冲刷用 ``is_final`` 为 true 的那次调用，冲刷完 ``cache`` 被丢弃；
 - 部分结果与最终结果分开返回；
@@ -16,10 +16,19 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
 
+from app.audio.asr_replay import (
+    REPLAY_BLOCK_SAMPLES,
+    _decode_wav_frames,
+    iter_pcm_blocks,
+    load_wav_int16_mono,
+    pcm_int16_to_float32,
+    replay_wav,
+)
 from app.audio.audio_capture import AudioBlock
 from app.audio.funasr_engine import (
     ASR_FINAL_LATENCY_METRIC,
@@ -108,7 +117,7 @@ class _CacheWritingFactory:
         """建一个会写 cache 的假模型。"""
         self.requests.append({"model": model, "model_path": model_path, "device": device})
         fake: _CacheWritingModel
-        if model == "fsmn-vad":
+        if model == "FsmnVADStreaming":
             fake = _CacheWritingModel(model=model, model_path=model_path, device=device)
         elif self.fail_on_final:
             fake = _FailingFinalModel(model=model, model_path=model_path, device=device)
@@ -121,7 +130,7 @@ class _CacheWritingFactory:
     def asr_model(self) -> _CacheWritingModel:
         """ASR 那个假模型。"""
         for model in self.models:
-            if model.model != "fsmn-vad":
+            if model.model != "FsmnVADStreaming":
                 return model
         raise AssertionError("ASR 模型还没建起来")
 
@@ -148,7 +157,7 @@ class _FakeFactory:
         if model in self.fail_models:
             raise RuntimeError(f"{model} 加载失败")
         fake: _FakeModel
-        if model == "fsmn-vad":
+        if model == "FsmnVADStreaming":
             fake = _FakeVadModel(model=model, model_path=model_path, device=device)
         else:
             fake = _FakeModel(model=model, model_path=model_path, device=device)
@@ -159,14 +168,14 @@ class _FakeFactory:
     def asr_model(self) -> _FakeModel:
         """ASR 那个假模型。"""
         for model in self.models:
-            if model.model != "fsmn-vad":
+            if model.model != "FsmnVADStreaming":
                 return model
         raise AssertionError("ASR 模型还没建起来")
 
     @property
     def asr_requests(self) -> list[dict[str, str]]:
         """ASR 的创建请求。"""
-        return [request for request in self.requests if request["model"] != "fsmn-vad"]
+        return [request for request in self.requests if request["model"] != "FsmnVADStreaming"]
 
 
 class _ListHandler(logging.Handler):
@@ -226,21 +235,46 @@ def _engine(factory: _FakeFactory, **kwargs: Any) -> FunASREngine:
 # --------------------------------------------------------------------------
 # 攒块与推理参数
 # --------------------------------------------------------------------------
-async def test_feed_waits_for_600ms_before_calling_model() -> None:
-    """200 毫秒的块攒够 600 毫秒才调一次模型。"""
+async def test_feed_waits_for_200ms_before_calling_model() -> None:
+    """200 毫秒的块攒满 200 毫秒（3200 点）就调一次模型，不满一块先攒着。"""
     factory = _FakeFactory()
     engine = _engine(factory)
     await engine.ensure_loaded()
 
-    # 两块 200 毫秒还差 400 毫秒，不调模型
-    assert await engine.feed(_block()) == ""
-    assert await engine.feed(_block()) == ""
-    assert factory.asr_model.calls == []
-
-    # 第三块凑够 600 毫秒，调一次模型
+    # 一块 200 毫秒凑满 3200 点，立即调一次模型
     text = await engine.feed(_block())
     assert len(factory.asr_model.calls) == 1
-    assert text == "paraformer-zh-streaming#1"
+    assert text == "ParaformerStreaming#1"
+
+    # 半块 100 毫秒不满 3200 点，先攒着不调模型
+    assert await engine.feed(_block(count=1600)) == ""
+    assert len(factory.asr_model.calls) == 1
+
+    # 再来半块凑满 3200 点，再调一次模型
+    text = await engine.feed(_block(count=1600))
+    assert len(factory.asr_model.calls) == 2
+    assert text == "ParaformerStreaming#2"
+
+
+async def test_feed_logs_buffer_wait_debug_event(
+    captured_logs: list[logging.LogRecord],
+) -> None:
+    """缓冲攒满触发解码时记 DEBUG 埋点 ``asr.decode.buffer_wait``。"""
+    factory = _FakeFactory()
+    engine = _engine(factory)
+    await engine.ensure_loaded()
+
+    await engine.feed(_block())
+
+    events = [
+        record
+        for record in captured_logs
+        if getattr(record, "event", "") == "asr.decode.buffer_wait"
+    ]
+    assert events, "攒满触发解码时没有记 buffer_wait 埋点"
+    fields = getattr(events[-1], "fields", {})
+    assert fields["pending_samples"] == MODEL_CHUNK_SAMPLES
+    assert fields["buffered_wait_ms"] >= 0
 
 
 async def test_feed_passes_contract_parameters() -> None:
@@ -258,7 +292,7 @@ async def test_feed_passes_contract_parameters() -> None:
     assert call["decoder_chunk_look_back"] == 1
     assert call["batch_size"] == 1
     assert call["is_final"] is False
-    # 一次调用只传一段 600 毫秒的波形
+    # 一次调用只传一段 200 毫秒的波形
     assert call["input"].shape == (MODEL_CHUNK_SAMPLES,)
     assert call["input"].dtype == np.float32
 
@@ -312,7 +346,7 @@ async def test_cache_shared_within_stream_and_not_between_streams() -> None:
     engine = _engine(factory)
     await engine.ensure_loaded()
 
-    # 第一条流：三次喂音频攒出一块，冲刷再调一次
+    # 第一条流：三次喂音频各调一次模型，冲刷再调一次
     for _ in range(3):
         await engine.feed(_block())
     await engine.flush()
@@ -322,10 +356,12 @@ async def test_cache_shared_within_stream_and_not_between_streams() -> None:
         await engine.feed(_block())
 
     calls = factory.asr_model.calls
-    assert len(calls) == 3
-    first_stream = [call["cache"] for call in calls[:2]]
-    second_stream = [call["cache"] for call in calls[2:]]
-    assert first_stream[0] is first_stream[1]
+    assert len(calls) == 7
+    first_stream = [call["cache"] for call in calls[:4]]
+    second_stream = [call["cache"] for call in calls[4:]]
+    assert (
+        first_stream[0] is first_stream[1] is first_stream[2] is first_stream[3]
+    )
     assert second_stream[0] is not first_stream[0]
 
 
@@ -395,12 +431,12 @@ async def test_feed_records_asr_latency_and_flush_does_not(
         await engine.feed(_block())
 
     samples = isolated_recorder.samples(ASR_LATENCY_METRIC)
-    assert len(samples) == 1
+    assert len(samples) == 3
     assert samples[0].value_ms >= 0
 
     await engine.flush()
 
-    assert len(isolated_recorder.samples(ASR_LATENCY_METRIC)) == 1
+    assert len(isolated_recorder.samples(ASR_LATENCY_METRIC)) == 3
 
 
 async def test_flush_drops_cache_after_normal_flush() -> None:
@@ -413,7 +449,7 @@ async def test_flush_drops_cache_after_normal_flush() -> None:
 
     # 模型往 cache 里写了状态
     assert engine.has_cached_state is True
-    assert engine.stream_calls == 1
+    assert engine.stream_calls == 3
 
     await engine.flush()
 
@@ -437,6 +473,7 @@ async def test_flush_drops_cache_even_when_decode_fails() -> None:
 
     # 模型往 cache 里写了状态
     assert engine.has_cached_state is True
+    assert engine.stream_calls == 3
 
     with pytest.raises(AsrDecodeError) as excinfo:
         await engine.flush()
@@ -482,19 +519,25 @@ async def test_partial_and_final_results_are_returned_separately() -> None:
         partial += await engine.feed(_block())
     final = await engine.flush()
 
-    assert partial == "paraformer-zh-streaming#1"
-    assert final == "paraformer-zh-streaming#2"
-    assert partial + final == "paraformer-zh-streaming#1paraformer-zh-streaming#2"
+    assert partial == "ParaformerStreaming#1ParaformerStreaming#2ParaformerStreaming#3"
+    assert final == "ParaformerStreaming#4"
+    assert partial + final == (
+        "ParaformerStreaming#1ParaformerStreaming#2ParaformerStreaming#3"
+        "ParaformerStreaming#4"
+    )
 
 
-async def test_feed_returns_empty_string_when_nothing_decoded() -> None:
-    """模型没解出文本时返回空串。"""
+async def test_feed_returns_empty_string_when_buffer_not_full() -> None:
+    """缓冲不满 3200 点时不调模型，返回空串。"""
     factory = _FakeFactory()
     engine = _engine(factory)
     await engine.ensure_loaded()
-    assert await engine.feed(_block()) == ""
-    assert await engine.feed(_block()) == ""
-    assert await engine.feed(_block()) == "paraformer-zh-streaming#1"
+    # 半块 100 毫秒不满 3200 点，不调模型，返回空串
+    assert await engine.feed(_block(count=1600)) == ""
+    assert factory.asr_model.calls == []
+    # 再来半块凑满 3200 点，触发一次解码
+    assert await engine.feed(_block(count=1600)) == "ParaformerStreaming#1"
+    assert len(factory.asr_model.calls) == 1
 
 
 # --------------------------------------------------------------------------
@@ -506,7 +549,7 @@ async def test_vad_disabled_does_not_create_vad_instance() -> None:
     engine = _engine(factory, vad_enabled=False)
     await engine.ensure_loaded()
 
-    assert [request["model"] for request in factory.requests] == ["paraformer-zh-streaming"]
+    assert [request["model"] for request in factory.requests] == ["ParaformerStreaming"]
     assert engine.has_vad is False
 
 
@@ -517,8 +560,8 @@ async def test_vad_enabled_creates_its_own_instance() -> None:
     await engine.ensure_loaded()
 
     assert [request["model"] for request in factory.requests] == [
-        "paraformer-zh-streaming",
-        "fsmn-vad",
+        "ParaformerStreaming",
+        "FsmnVADStreaming",
     ]
     assert engine.has_vad is True
 
@@ -532,7 +575,7 @@ async def test_detect_speech_returns_intervals_from_model() -> None:
     intervals = await engine.detect_speech(_block(count=16000))
     assert intervals == [(0, 1200), (1500, 3200)]
 
-    vad_calls = [model for model in factory.models if model.model == "fsmn-vad"]
+    vad_calls = [model for model in factory.models if model.model == "FsmnVADStreaming"]
     assert vad_calls[0].calls[0]["chunk_size"] == 600
 
 
@@ -617,7 +660,7 @@ async def test_model_path_is_used_not_model_dir() -> None:
 # --------------------------------------------------------------------------
 async def test_load_failure_raises_asr_load_error() -> None:
     """模型加载失败抛 AsrLoadError，状态是 error。"""
-    factory = _FakeFactory(fail_models=("paraformer-zh-streaming",))
+    factory = _FakeFactory(fail_models=("ParaformerStreaming",))
     engine = _engine(factory, device=DEVICE_CPU)
 
     with pytest.raises(AsrLoadError) as excinfo:
@@ -628,7 +671,7 @@ async def test_load_failure_raises_asr_load_error() -> None:
 
 async def test_vad_load_failure_keeps_the_asr_instance() -> None:
     """VAD 建不起来时 ASR 的实例不丢，下次只补建 VAD。"""
-    factory = _FakeFactory(fail_models=("fsmn-vad",))
+    factory = _FakeFactory(fail_models=("FsmnVADStreaming",))
     engine = _engine(factory, device=DEVICE_CPU)
 
     with pytest.raises(AsrLoadError) as excinfo:
@@ -659,7 +702,7 @@ async def test_decode_failure_raises_asr_decode_error() -> None:
 
         def __call__(self, *, model: str, model_path: str, device: str) -> _FakeModel:
             """建一个会失败的假模型。"""
-            if model == "fsmn-vad":
+            if model == "FsmnVADStreaming":
                 return super().__call__(model=model, model_path=model_path, device=device)
             self.requests.append(
                 {"model": model, "model_path": model_path, "device": device}
@@ -669,10 +712,9 @@ async def test_decode_failure_raises_asr_decode_error() -> None:
     engine = _engine(_FailingFactory(), device=DEVICE_CPU)
     await engine.ensure_loaded()
 
-    # 攒够 600 毫秒触发推理，推理失败
+    # 一块 200 毫秒凑满 3200 点就触发推理，推理失败
     with pytest.raises(AsrDecodeError) as excinfo:
-        for _ in range(3):
-            await engine.feed(_block())
+        await engine.feed(_block())
     assert excinfo.value.code == "E_ASR_DECODE"
     assert engine.state == STATE_ERROR
 
@@ -757,8 +799,8 @@ async def test_short_stream_keeps_the_same_cache() -> None:
         await engine.feed(_block())
 
     calls = factory.asr_model.calls
-    assert len(calls) == 3
-    assert calls[0]["cache"] is calls[1]["cache"] is calls[2]["cache"]
+    assert len(calls) == 9
+    assert all(call["cache"] is calls[0]["cache"] for call in calls)
 
 
 async def test_pending_buffer_is_trimmed_when_over_limit(
@@ -781,3 +823,219 @@ async def test_pending_buffer_is_trimmed_when_over_limit(
     fields = getattr(trims[-1], "fields", {})
     assert fields["dropped_samples"] == 30000 - MAX_PENDING_SAMPLES
     assert fields["limit_samples"] == MAX_PENDING_SAMPLES
+
+# ----------------------------------------------------------------------
+# ASR 回放
+# ----------------------------------------------------------------------
+class _ReplayEngine:
+    """回放测试用的假引擎：记下喂进来的块，按块次序吐增量文本。"""
+
+    def __init__(self) -> None:
+        self.blocks: list[Any] = []
+        self.flushed = False
+
+    async def feed(self, block: Any) -> str:
+        """记下这块音频，返回按次序编号的增量文本。"""
+        self.blocks.append(np.array(block, dtype="float32", copy=True))
+        return f"块{len(self.blocks)}"
+
+    async def flush(self) -> str:
+        """记下冲刷，返回收尾文本。"""
+        self.flushed = True
+        return "收尾"
+
+
+def _write_wav(path: Path, samples: Any, *, rate: int = 16000, channels: int = 1) -> None:
+    """把 int16 样本写成 16 位 wav 文件（测试辅助）。"""
+    import wave
+
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(np.asarray(samples, dtype="<i2").tobytes())
+
+
+async def test_replay_wav_feeds_200ms_blocks_and_returns_joined_text(
+    tmp_path: Path,
+) -> None:
+    """wav 按 200 毫秒切块喂引擎，整句是增量拼接加收尾。"""
+    # 11200 点 = 3.5 块，最后一块只有 1600 点
+    _write_wav(tmp_path / "question.wav", np.zeros(11200, dtype="int16"))
+    engine = _ReplayEngine()
+
+    text = await replay_wav(engine, tmp_path / "question.wav")
+
+    assert [int(block.size) for block in engine.blocks] == [
+        REPLAY_BLOCK_SAMPLES,
+        REPLAY_BLOCK_SAMPLES,
+        REPLAY_BLOCK_SAMPLES,
+        1600,
+    ]
+    assert engine.flushed is True
+    assert text == "块1块2块3块4收尾"
+
+
+async def test_replay_wav_converts_int16_to_float32_range(tmp_path: Path) -> None:
+    """int16 PCM 喂引擎前归一化成 [-1, 1) 的 float32。"""
+    _write_wav(tmp_path / "loud.wav", np.full(3200, 32767, dtype="int16"))
+    engine = _ReplayEngine()
+
+    await replay_wav(engine, tmp_path / "loud.wav")
+
+    block = engine.blocks[0]
+    assert block.dtype == np.float32
+    assert float(block[0]) == pytest.approx(32767.0 / 32768.0, abs=1e-6)
+
+
+async def test_replay_wav_empty_wav_flushes_without_feeding(tmp_path: Path) -> None:
+    """空 wav 不喂引擎，直接冲刷返回收尾文本。"""
+    _write_wav(tmp_path / "empty.wav", np.zeros(0, dtype="int16"))
+    engine = _ReplayEngine()
+
+    text = await replay_wav(engine, tmp_path / "empty.wav")
+
+    assert engine.blocks == []
+    assert engine.flushed is True
+    assert text == "收尾"
+
+
+async def test_load_wav_downmixes_stereo_and_resamples_to_16k(tmp_path: Path) -> None:
+    """48k 立体声下混成单声道并重采样到 16k。"""
+    stereo = np.empty(96000, dtype="int16")
+    stereo[0::2] = 16384   # 左声道
+    stereo[1::2] = -16384  # 右声道，两声道反相
+    _write_wav(tmp_path / "stereo.wav", stereo, rate=48000, channels=2)
+
+    pcm = load_wav_int16_mono(tmp_path / "stereo.wav")
+
+    assert pcm.dtype == np.int16
+    assert int(pcm.size) == 16000
+    # 反相求平均后是 0，量化误差不超过 1
+    assert int(np.max(np.abs(pcm))) <= 1
+
+
+async def test_load_wav_upsamples_8k_to_16k(tmp_path: Path) -> None:
+    """8k 单声道重采样到 16k，长度翻倍，恒定波形幅值不变。"""
+    _write_wav(tmp_path / "low.wav", np.full(8000, 16000, dtype="int16"), rate=8000)
+
+    pcm = load_wav_int16_mono(tmp_path / "low.wav")
+
+    assert int(pcm.size) == 16000
+    assert float(np.mean(pcm.astype(np.float32))) == pytest.approx(16000.0, abs=1.0)
+
+
+def test_iter_pcm_blocks_last_block_may_be_short() -> None:
+    """切块时最后一块不足点数也产出。"""
+    pcm = np.arange(7, dtype="int16")
+
+    blocks = list(iter_pcm_blocks(pcm, block_samples=3))
+
+    assert [int(block.size) for block in blocks] == [3, 3, 1]
+    assert int(blocks[-1][0]) == 6
+
+
+def test_iter_pcm_blocks_rejects_non_positive_block() -> None:
+    """块长不是正数时报 ValueError。"""
+    pcm = np.zeros(10, dtype="int16")
+
+    with pytest.raises(ValueError):
+        list(iter_pcm_blocks(pcm, block_samples=0))
+
+
+def test_pcm_int16_to_float32_maps_full_scale() -> None:
+    """满量程的 int16 映射到 [-1, 1) 的两端。"""
+    pcm = np.array([-32768, -1, 0, 32767], dtype="int16")
+
+    samples = pcm_int16_to_float32(pcm)
+
+    assert samples.dtype == np.float32
+    assert float(samples[0]) == -1.0
+    assert float(samples[3]) == pytest.approx(32767.0 / 32768.0)
+
+
+def test_decode_wav_frames_supports_24bit() -> None:
+    """24 位小端补码解码：正满量程与负满量程各验一个点。"""
+    raw = b"\xff\xff\x7f" + b"\x00\x00\x80"
+
+    samples = _decode_wav_frames(raw, 3)
+
+    assert float(samples[0]) == pytest.approx(8388607 / 8388608, abs=1e-6)
+    assert float(samples[1]) == pytest.approx(-1.0, abs=1e-6)
+
+# --------------------------------------------------------------------------
+# 整段录音缓存（重识别用）
+# --------------------------------------------------------------------------
+async def test_take_recording_returns_concatenated_pcm() -> None:
+    """feed 进来的整段 PCM 从录音缓存里按原样取出。"""
+    factory = _FakeFactory()
+    engine = _engine(factory)
+    await engine.ensure_loaded()
+
+    await engine.feed(_block(count=3200, value=0.1))
+    await engine.feed(_block(count=3200, value=0.2))
+    await engine.feed(_block(count=1600, value=0.3))
+
+    wave = engine.take_recording()
+    assert int(wave.size) == 8000
+    assert float(wave[0]) == pytest.approx(0.1)
+    assert float(wave[3200]) == pytest.approx(0.2)
+    assert float(wave[6400]) == pytest.approx(0.3)
+
+
+async def test_take_recording_clears_cache() -> None:
+    """录音缓存取走即清空，下次录音重新积累。"""
+    factory = _FakeFactory()
+    engine = _engine(factory)
+    await engine.ensure_loaded()
+    await engine.feed(_block())
+
+    wave = engine.take_recording()
+    assert int(wave.size) == 3200
+    assert int(engine.take_recording().size) == 0
+
+
+async def test_flush_resets_recording_cache() -> None:
+    """冲刷会清掉录音缓存：取录音必须在冲刷之前。"""
+    factory = _FakeFactory()
+    engine = _engine(factory)
+    await engine.ensure_loaded()
+    await engine.feed(_block())
+
+    await engine.flush()
+
+    assert int(engine.take_recording().size) == 0
+
+
+async def test_recording_trimmed_over_limit(
+    captured_logs: list[logging.LogRecord],
+) -> None:
+    """录音缓存超过上限（max_stream_seconds）丢最早的音频并记日志。"""
+    factory = _FakeFactory()
+    engine = _engine(factory, max_stream_seconds=1)
+    await engine.ensure_loaded()
+
+    # 20000 点超过 1 秒（16000 点）的上限
+    await engine.feed(_block(count=20000))
+
+    wave = engine.take_recording()
+    assert int(wave.size) == 16000
+    trims = [
+        record
+        for record in captured_logs
+        if getattr(record, "event", "") == "asr.recording.trimmed"
+    ]
+    assert trims, "录音缓存超过上限时没有记日志"
+    fields = getattr(trims[-1], "fields", {})
+    assert fields["dropped_samples"] == 4000
+
+
+async def test_empty_recording_returns_empty_array() -> None:
+    """一段音频都没喂过时录音缓存是空数组。"""
+    factory = _FakeFactory()
+    engine = _engine(factory)
+
+    wave = engine.take_recording()
+
+    assert int(wave.size) == 0
+    assert wave.dtype == np.float32

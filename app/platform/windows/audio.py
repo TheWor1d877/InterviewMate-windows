@@ -25,12 +25,19 @@ WASAPI loopback 走共享模式，``soundcard`` 以共享模式打开端点并�
 
 ``soundcard`` 只在方法体内按需导入，模块顶层不 import 它；``sounddevice``
 同样是按需导入，这样没有声卡的环境也能导入本模块。
+
+``soundcard`` 只在导入它的线程上初始化过 COM，而枚举与采集都在独立线程里
+跑，线程里必须先用 :func:`_com_apartment` 初始化 COM，离开时配对释放；
+不初始化的话 ``CoCreateInstance`` 返回 ``CO_E_NOTINITIALIZED``
+（0x800401f0），回环设备一枚都枚不到。
 """
 
 from __future__ import annotations
 
+import sys
 import threading
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Callable, Iterator, TypeVar
 
 from app.config import current_config
 from app.core.exceptions import AudioDeviceError
@@ -65,6 +72,77 @@ _MAX_STREAM_CHANNELS: int = 2
 DEFAULT_INIT_TIMEOUT: float = 10.0
 
 _T = TypeVar("_T")
+
+
+# COM 初始化参数：线程按单线程套间（STA）初始化，与 ``soundcard`` 导入时的
+# 做法一致，见《5-语音输入与流式ASR》「采集参数」一节
+_COINIT_APARTMENTTHREADED: int = 0x2
+
+# COM 返回码：线程已按别的套间模型初始化过。``CoInitializeEx`` 返回它时
+# 这次调用没有加引用计数，不能配对 ``CoUninitialize``
+_RPC_E_CHANGED_MODE: int = -2147417850  # 0x80010106
+
+
+def _com_initialize() -> bool:
+    """在当前线程初始化 COM，返回是否要配对 :func:`_com_uninitialize`。
+
+    ``soundcard`` 的 Windows 后端只在导入它的线程上初始化过 COM，别的线程
+    调它的 API 前必须自己初始化，否则 ``CoCreateInstance`` 返回
+    ``CO_E_NOTINITIALIZED``（0x800401f0）。这里直接用系统库 ``ole32``：
+    venv 里没有 comtypes，ctypes 是标准库，不新增第三方依赖。
+
+    线程已经按别的套间模型初始化过时（``RPC_E_CHANGED_MODE``），这次调用
+    没有加引用计数，返回 False，调用方不用配对释放；S_OK 与 S_FALSE 都
+    加了引用，都要配对释放。非 Windows 平台或 ole32 加载失败时返回 False，
+    调用方照常继续（跟没有这层保护时一样）。
+
+    :returns: 当前线程这次真的初始化过 COM 时返回 True。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        ole32 = ctypes.WinDLL("ole32")
+        hr = int(ole32.CoInitializeEx(None, _COINIT_APARTMENTTHREADED))
+    except Exception:
+        return False
+    if hr == _RPC_E_CHANGED_MODE:
+        return False
+    return True
+
+
+def _com_uninitialize() -> None:
+    """配对释放当前线程的 COM 初始化，失败时静默忽略。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ole32 = ctypes.WinDLL("ole32")
+        ole32.CoUninitialize()
+    except Exception:
+        pass
+
+
+@contextmanager
+def _com_apartment() -> Iterator[None]:
+    """soundcard 的 COM 调用要跑在已初始化 COM 的线程里。
+
+    COM 初始化是每线程独立的：进入时初始化当前线程，离开时配对释放，
+    不会影响别的线程。引用计数按 ``CoInitializeEx`` 的返回值配对，
+    线程已经在别的套间模型下时不加引用也不释放。
+
+    释放放在 ``finally`` 里：``soundcard`` 的对象（recorder 等）在
+    ``with`` 内层先关掉，之后才走到这里，COM 对象不会带着未释放的
+    引用注销套间。
+    """
+    owns = _com_initialize()
+    try:
+        yield
+    finally:
+        if owns:
+            _com_uninitialize()
 
 
 def _run_with_timeout(func: Callable[[], _T], timeout: float, what: str) -> _T:
@@ -317,29 +395,36 @@ class _WasapiLoopbackStream:
             self._thread.join(2.0)
 
     def _run(self) -> None:
-        """采集线程：打开 recorder，循环读块，下混重采样后交给回调。"""
-        try:
-            with self._recorder_factory() as recorder:
-                self._recorder = recorder
-                self._ready.set()
-                while not self._stop.is_set():
-                    data = recorder.record(numframes=self._block_frames)
-                    samples = _downmix_to_mono(data)
-                    samples = _resample_to(samples, self._native_rate, self._sample_rate)
-                    try:
-                        self._on_block(samples)
-                    except Exception as exc:
-                        log_event(
-                            "audio.stream.callback_failed",
-                            f"音频块回调失败：{exc}",
-                            level="WARNING",
-                            error=str(exc),
+        """采集线程：打开 recorder，循环读块，下混重采样后交给回调。
+
+        打开 recorder 与 ``record`` 读取都是 COM 调用，采集线程不是导入
+        ``soundcard`` 的线程，整个线程体先初始化 COM，退出时配对释放。
+        """
+        with _com_apartment():
+            try:
+                with self._recorder_factory() as recorder:
+                    self._recorder = recorder
+                    self._ready.set()
+                    while not self._stop.is_set():
+                        data = recorder.record(numframes=self._block_frames)
+                        samples = _downmix_to_mono(data)
+                        samples = _resample_to(
+                            samples, self._native_rate, self._sample_rate
                         )
-        except BaseException as exc:  # noqa: BLE001 - 打开失败要回传给调用方
-            self._error = exc
-            self._ready.set()
-        finally:
-            self._recorder = None
+                        try:
+                            self._on_block(samples)
+                        except Exception as exc:
+                            log_event(
+                                "audio.stream.callback_failed",
+                                f"音频块回调失败：{exc}",
+                                level="WARNING",
+                                error=str(exc),
+                            )
+            except BaseException as exc:  # noqa: BLE001 - 打开失败要回传给调用方
+                self._error = exc
+                self._ready.set()
+            finally:
+                self._recorder = None
 
 
 class WasapiAudioBackend:
@@ -393,7 +478,8 @@ class WasapiAudioBackend:
             )
             return []
         try:
-            candidates = list(sc.all_microphones(include_loopback=True))
+            with _com_apartment():
+                candidates = list(sc.all_microphones(include_loopback=True))
         except Exception as exc:
             log_event(
                 "audio.loopback.enumerate_failed",
@@ -432,8 +518,9 @@ class WasapiAudioBackend:
         try:
             import soundcard as sc
 
-            speaker = sc.default_speaker()
-            device_id = str(getattr(speaker, "id", ""))
+            with _com_apartment():
+                speaker = sc.default_speaker()
+                device_id = str(getattr(speaker, "id", ""))
         except Exception:
             return None
         return device_id or None
@@ -456,7 +543,8 @@ class WasapiAudioBackend:
         resolved: Any = None
         if cached_id:
             try:
-                candidate = sc.get_microphone(cached_id, include_loopback=True)
+                with _com_apartment():
+                    candidate = sc.get_microphone(cached_id, include_loopback=True)
                 if bool(getattr(candidate, "isloopback", False)):
                     resolved = candidate
             except Exception:

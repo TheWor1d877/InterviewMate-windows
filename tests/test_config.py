@@ -1,7 +1,7 @@
 """配置加载与校验的测试。
 
 覆盖《2-骨架与配置》配置结构一节、环境变量一节，以及《接口契约》
-DeepSeek 模型标识与基址一节的退役模型名规则。
+模型标识与基址一节的退役模型名规则。
 """
 
 from __future__ import annotations
@@ -21,13 +21,13 @@ from app.config import (
     ENV_OVERRIDES,
     OPTIONAL_ENV,
     REQUIRED_ENV,
-    RETIRED_DEEPSEEK_MODELS,
+    RETIRED_MODEL_NAMES,
     AppConfig,
     AppSettings,
     ASRSettings,
     AudioSettings,
     CodingSettings,
-    DeepSeekSettings,
+    ModelSettings,
     DifySettings,
     HotkeySettings,
     PrivacySettings,
@@ -44,22 +44,22 @@ from app.core.exceptions import ConfigError
 
 # 会影响配置结果的环境变量，测试里统一清掉
 _OVERRIDE_ENV = (
-    "DEEPSEEK_BASE_URL",
-    "DEEPSEEK_MODEL",
+    "MODEL_BASE_URL",
+    "MODEL_NAME",
     "DIFY_BASE_URL",
     "DIFY_DATASET_ID",
     "DIFY_DATASET_API_KEY",
 )
 # 必填环境变量，缺失检查相关的测试单独控制
-_API_KEY_ENV = "DEEPSEEK_API_KEY"
+_API_KEY_ENV = "MODEL_API_KEY"
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """清掉会影响配置的环境变量，并把默认 .env 路径指向不存在的文件。
 
-    开发者在仓库根建 .env 之后（默认配置里没有 DEEPSEEK_API_KEY，
-    但可能有 DEEPSEEK_MODEL 等覆盖项），默认配置相关的断言不应受其影响，
+    开发者在仓库根建 .env 之后（默认配置里没有 MODEL_API_KEY，
+    但可能有 MODEL_NAME 等覆盖项），默认配置相关的断言不应受其影响，
     否则 M8 阶段会出现与代码无关的假失败。
     """
     for name in _OVERRIDE_ENV + (_API_KEY_ENV,):
@@ -118,13 +118,13 @@ def test_default_config_loads() -> None:
     assert config.app.log_level == "INFO"
     assert config.ui.left_ratio == 22
     assert config.ui.right_ratio == 78
-    assert config.deepseek.model == "deepseek-flash"
-    assert config.deepseek.base_url == "https://api.deepseek.com"
-    assert config.deepseek.thinking == "disabled"
-    assert config.deepseek.reasoning_effort == "low"
+    assert config.model.name == "deepseek-flash"
+    assert config.model.base_url == "https://api.deepseek.com"
+    assert config.model.thinking == "disabled"
+    assert config.model.reasoning_effort == "low"
     assert config.rag.score_threshold == 0.0
     assert config.rag.force_project_mode is False
-    assert config.providers.llm == "deepseek"
+    assert config.providers.llm == "openai"
     assert config.providers.retrieval == "dify"
     assert config.providers.asr == "funasr"
     assert config.providers.screenshot == "mss"
@@ -139,7 +139,7 @@ def test_default_config_top_level_keys() -> None:
         "audio",
         "asr",
         "screenshot",
-        "deepseek",
+        "model",
         "rag",
         "dify",
         "coding",
@@ -155,12 +155,12 @@ def test_default_config_file_exists() -> None:
 
 
 def test_load_config_without_api_key_succeeds() -> None:
-    """load_config 不检查 DEEPSEEK_API_KEY，缺变量也能加载。"""
+    """load_config 不检查 MODEL_API_KEY，缺变量也能加载。"""
     import os
 
-    assert "DEEPSEEK_API_KEY" not in os.environ
+    assert "MODEL_API_KEY" not in os.environ
     config = load_config()
-    assert config.deepseek.model == "deepseek-flash"
+    assert config.model.name == "deepseek-flash"
 
 
 def test_default_path_is_independent_of_cwd(
@@ -272,16 +272,16 @@ def test_unknown_nested_key_raises_config_error(tmp_path: Path) -> None:
 
 
 def test_invalid_thinking_raises_config_error(tmp_path: Path) -> None:
-    """deepseek.thinking 取值非法抛 ConfigError。"""
+    """model.thinking 取值非法抛 ConfigError。"""
     with pytest.raises(ConfigError):
-        _load_mutated(tmp_path, lambda data: data["deepseek"].__setitem__("thinking", "always"))
+        _load_mutated(tmp_path, lambda data: data["model"].__setitem__("thinking", "always"))
 
 
 def test_invalid_reasoning_effort_raises_config_error(tmp_path: Path) -> None:
-    """deepseek.reasoning_effort 取值非法抛 ConfigError。"""
+    """model.reasoning_effort 取值非法抛 ConfigError。"""
     with pytest.raises(ConfigError):
         _load_mutated(
-            tmp_path, lambda data: data["deepseek"].__setitem__("reasoning_effort", "none")
+            tmp_path, lambda data: data["model"].__setitem__("reasoning_effort", "none")
         )
 
 
@@ -422,12 +422,12 @@ def test_dify_defaults() -> None:
 
 
 def test_default_config_dify_section() -> None:
-    """默认配置里的 dify 段与 config/config.yaml 一致。"""
+    """默认配置里 dify 段是三个空串，真实值从 DIFY_* 环境变量覆盖而来。"""
     config = load_config()
 
-    assert config.dify.base_url == "http://your-dify-host/v1"
-    assert config.dify.dataset_id == "your_dataset_id"
-    assert config.dify.api_key == "your_dataset_api_key"
+    assert config.dify.base_url == ""
+    assert config.dify.dataset_id == ""
+    assert config.dify.api_key == ""
 
 
 def test_dify_fields_can_be_overridden(tmp_path: Path) -> None:
@@ -479,7 +479,7 @@ def test_invalid_log_level_raises_config_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("key", "value"),
     [
-        ("llm", "openai"),
+        ("llm", "anthropic"),
         ("retrieval", "elastic"),
         ("asr", "whisper"),
         ("screenshot", "imagemagick"),
@@ -498,10 +498,10 @@ def test_valid_provider_values_accepted(tmp_path: Path) -> None:
     config = _load_mutated(
         tmp_path,
         lambda data: data["providers"].update(
-            {"llm": "deepseek", "retrieval": "dify", "asr": "funasr", "screenshot": "mss"}
+            {"llm": "openai", "retrieval": "dify", "asr": "funasr", "screenshot": "mss"}
         ),
     )
-    assert config.providers.llm == "deepseek"
+    assert config.providers.llm == "openai"
     assert config.providers.retrieval == "dify"
     assert config.providers.asr == "funasr"
     assert config.providers.screenshot == "mss"
@@ -557,13 +557,13 @@ def test_top_k_zero_raises_config_error(tmp_path: Path) -> None:
 def test_temperature_out_of_range_raises_config_error(tmp_path: Path) -> None:
     """temperature 超出 0..2 抛 ConfigError。"""
     with pytest.raises(ConfigError):
-        _load_mutated(tmp_path, lambda data: data["deepseek"].__setitem__("temperature", 5.0))
+        _load_mutated(tmp_path, lambda data: data["model"].__setitem__("temperature", 5.0))
 
 
 def test_negative_max_retries_raises_config_error(tmp_path: Path) -> None:
     """max_retries 为负抛 ConfigError。"""
     with pytest.raises(ConfigError):
-        _load_mutated(tmp_path, lambda data: data["deepseek"].__setitem__("max_retries", -1))
+        _load_mutated(tmp_path, lambda data: data["model"].__setitem__("max_retries", -1))
 
 
 def test_non_positive_timeout_raises_config_error(tmp_path: Path) -> None:
@@ -575,22 +575,22 @@ def test_non_positive_timeout_raises_config_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- 退役模型名
 
 
-@pytest.mark.parametrize("model_name", RETIRED_DEEPSEEK_MODELS)
+@pytest.mark.parametrize("model_name", RETIRED_MODEL_NAMES)
 def test_retired_model_name_rejected(tmp_path: Path, model_name: str) -> None:
     """四个退役模型名都被拒绝，报错消息同时列出全部名字。"""
     with pytest.raises(ConfigError) as excinfo:
-        _load_mutated(tmp_path, lambda data: data["deepseek"].__setitem__("model", model_name))
+        _load_mutated(tmp_path, lambda data: data["model"].__setitem__("name", model_name))
     message = str(excinfo.value)
-    for name in RETIRED_DEEPSEEK_MODELS:
+    for name in RETIRED_MODEL_NAMES:
         assert name in message
 
 
 def test_other_model_name_accepted(tmp_path: Path) -> None:
     """非退役的模型名可以接受。"""
     config = _load_mutated(
-        tmp_path, lambda data: data["deepseek"].__setitem__("model", "deepseek-flash-next")
+        tmp_path, lambda data: data["model"].__setitem__("name", "deepseek-flash-next")
     )
-    assert config.deepseek.model == "deepseek-flash-next"
+    assert config.model.name == "deepseek-flash-next"
 
 
 # ---------------------------------------------------------------- 环境变量覆盖
@@ -599,29 +599,29 @@ def test_other_model_name_accepted(tmp_path: Path) -> None:
 def test_env_overrides_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DEEPSEEK_MODEL 覆盖配置文件里的模型名。"""
-    monkeypatch.setenv("DEEPSEEK_MODEL", "from-env")
+    """MODEL_NAME 覆盖配置文件里的模型名。"""
+    monkeypatch.setenv("MODEL_NAME", "from-env")
     config = load_config(_write_config(tmp_path, _base_config()))
-    assert config.deepseek.model == "from-env"
+    assert config.model.name == "from-env"
 
 
 def test_env_overrides_base_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """DEEPSEEK_BASE_URL 覆盖配置文件里的基址。"""
-    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://example.invalid/v1")
+    """MODEL_BASE_URL 覆盖配置文件里的基址。"""
+    monkeypatch.setenv("MODEL_BASE_URL", "https://example.invalid/v1")
     config = load_config(_write_config(tmp_path, _base_config()))
-    assert config.deepseek.base_url == "https://example.invalid/v1"
+    assert config.model.base_url == "https://example.invalid/v1"
 
 
 def test_env_override_still_validated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """环境变量覆盖后仍走取值域校验，退役模型名照样报错。"""
-    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-chat")
+    monkeypatch.setenv("MODEL_NAME", "deepseek-chat")
     with pytest.raises(ConfigError) as excinfo:
         load_config(_write_config(tmp_path, _base_config()))
-    for name in RETIRED_DEEPSEEK_MODELS:
+    for name in RETIRED_MODEL_NAMES:
         assert name in str(excinfo.value)
 
 
@@ -645,8 +645,8 @@ def test_env_overrides_dify_section(
 def test_env_override_targets_are_documented() -> None:
     """只映射有对应配置项的五个环境变量。"""
     assert ENV_OVERRIDES == {
-        "DEEPSEEK_BASE_URL": ("deepseek", "base_url"),
-        "DEEPSEEK_MODEL": ("deepseek", "model"),
+        "MODEL_BASE_URL": ("model", "base_url"),
+        "MODEL_NAME": ("model", "name"),
         "DIFY_BASE_URL": ("dify", "base_url"),
         "DIFY_DATASET_ID": ("dify", "dataset_id"),
         "DIFY_DATASET_API_KEY": ("dify", "api_key"),
@@ -659,20 +659,20 @@ def test_env_override_targets_are_documented() -> None:
 def test_env_file_is_loaded(tmp_path: Path) -> None:
     """显式指定 .env 时，里面的值生效。"""
     env_file = tmp_path / ".env"
-    env_file.write_text("DEEPSEEK_MODEL=from-env-file\n", encoding="utf-8")
+    env_file.write_text("MODEL_NAME=from-env-file\n", encoding="utf-8")
     config = load_config(_write_config(tmp_path, _base_config()), env_file=str(env_file))
-    assert config.deepseek.model == "from-env-file"
+    assert config.model.name == "from-env-file"
 
 
 def test_env_file_does_not_override_existing_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """已有环境变量不被 .env 覆盖。"""
-    monkeypatch.setenv("DEEPSEEK_MODEL", "from-shell")
+    monkeypatch.setenv("MODEL_NAME", "from-shell")
     env_file = tmp_path / ".env"
-    env_file.write_text("DEEPSEEK_MODEL=from-env-file\n", encoding="utf-8")
+    env_file.write_text("MODEL_NAME=from-env-file\n", encoding="utf-8")
     config = load_config(_write_config(tmp_path, _base_config()), env_file=str(env_file))
-    assert config.deepseek.model == "from-shell"
+    assert config.model.name == "from-shell"
 
 
 def test_missing_env_file_is_ignored(tmp_path: Path) -> None:
@@ -681,7 +681,7 @@ def test_missing_env_file_is_ignored(tmp_path: Path) -> None:
         _write_config(tmp_path, _base_config()),
         env_file=str(tmp_path / "not-exists.env"),
     )
-    assert config.deepseek.model == "deepseek-flash"
+    assert config.model.name == "deepseek-flash"
 
 
 def test_default_env_file_points_to_repo_root(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -701,22 +701,22 @@ def test_default_env_file_is_auto_loaded(
 ) -> None:
     """不传 env_file 时，自动加载默认 .env（路径由 DEFAULT_ENV_FILE 指定）。"""
     env_file = tmp_path / "auto.env"
-    env_file.write_text("DEEPSEEK_MODEL=from-auto-env\n", encoding="utf-8")
+    env_file.write_text("MODEL_NAME=from-auto-env\n", encoding="utf-8")
     monkeypatch.setattr(app.config, "DEFAULT_ENV_FILE", env_file)
     config = load_config()
-    assert config.deepseek.model == "from-auto-env"
+    assert config.model.name == "from-auto-env"
 
 
 def test_default_env_file_does_not_override_existing_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """默认 .env 里的值不覆盖已有的环境变量。"""
-    monkeypatch.setenv("DEEPSEEK_MODEL", "from-shell")
+    monkeypatch.setenv("MODEL_NAME", "from-shell")
     env_file = tmp_path / "auto.env"
-    env_file.write_text("DEEPSEEK_MODEL=from-auto-env\n", encoding="utf-8")
+    env_file.write_text("MODEL_NAME=from-auto-env\n", encoding="utf-8")
     monkeypatch.setattr(app.config, "DEFAULT_ENV_FILE", env_file)
     config = load_config()
-    assert config.deepseek.model == "from-shell"
+    assert config.model.name == "from-shell"
 
 
 def test_local_env_file_does_not_affect_default_config(
@@ -729,8 +729,8 @@ def test_local_env_file_does_not_affect_default_config(
     """
     monkeypatch.setattr(app.config, "DEFAULT_ENV_FILE", tmp_path / "not-exists.env")
     config = load_config()
-    assert config.deepseek.model == "deepseek-flash"
-    assert config.providers.llm == "deepseek"
+    assert config.model.name == "deepseek-flash"
+    assert config.providers.llm == "openai"
 
 
 # ---------------------------------------------------------------- 必填环境变量
@@ -739,16 +739,16 @@ def test_local_env_file_does_not_affect_default_config(
 def test_missing_required_env_reports_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """缺 DEEPSEEK_API_KEY 时返回该变量名。"""
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    assert missing_required_env() == ("DEEPSEEK_API_KEY",)
+    """缺 MODEL_API_KEY 时返回该变量名。"""
+    monkeypatch.delenv("MODEL_API_KEY", raising=False)
+    assert missing_required_env() == ("MODEL_API_KEY",)
 
 
 def test_missing_required_env_empty_when_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """有 DEEPSEEK_API_KEY 时返回空元组。"""
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    """有 MODEL_API_KEY 时返回空元组。"""
+    monkeypatch.setenv("MODEL_API_KEY", "sk-test")
     assert missing_required_env() == ()
 
 
@@ -758,7 +758,7 @@ def test_env_constants() -> None:
     DIFY_BASE_URL / DIFY_DATASET_ID / DIFY_DATASET_API_KEY 有了对应的 dify 段，
     移进 ENV_OVERRIDES，OPTIONAL_ENV 现在是空的。
     """
-    assert REQUIRED_ENV == ("DEEPSEEK_API_KEY",)
+    assert REQUIRED_ENV == ("MODEL_API_KEY",)
     assert OPTIONAL_ENV == ()
 
 
@@ -774,7 +774,7 @@ def test_settings_models_are_exported() -> None:
         AudioSettings,
         ASRSettings,
         ScreenshotSettings,
-        DeepSeekSettings,
+        ModelSettings,
         RagSettings,
         CodingSettings,
         PrivacySettings,
@@ -796,8 +796,8 @@ def test_base_config_is_not_shared_between_loads(tmp_path: Path) -> None:
     first = load_config(_write_config(tmp_path, _base_config()))
     second = load_config(_write_config(tmp_path, _base_config()))
     assert first is not second
-    assert first.deepseek is not second.deepseek
-    assert copy.deepcopy(first).deepseek.model == "deepseek-flash"
+    assert first.model is not second.model
+    assert copy.deepcopy(first).model.name == "deepseek-flash"
 
 
 # ---------------------------------------------------------------- 进程级当前配置

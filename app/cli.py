@@ -18,14 +18,28 @@ import argparse
 import asyncio
 import importlib
 import json
+import os
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
+from app.audio.asr_replay import load_wav_int16_mono, pcm_int16_to_float32
+from app.audio.funasr_engine import DEFAULT_SAMPLE_RATE
+from app.audio.loopback_test import (
+    LoopbackCaptureRecorder,
+    LoopbackTestResult,
+    SoundDevicePlayer,
+    run_loopback_test,
+)
 from app.config import REPO_ROOT, AppConfig, missing_required_env
-from app.core.exceptions import ConfigError, InterviewMateError, SocketError
+from app.core.exceptions import (
+    AsrLoadError,
+    ConfigError,
+    InterviewMateError,
+    SocketError,
+)
 from app.main import (
     EXIT_ARG_ERROR,
     EXIT_CONFIG_ERROR,
@@ -39,6 +53,8 @@ from app.main import (
     required_packages,
     resolve_config_path,
     select_client,
+    select_final_refiner,
+    select_asr_engine,
     start_process,
 )
 from app.platform import get_platform
@@ -56,6 +72,7 @@ __all__ = [
     "cmd_test",
     "cmd_devices",
     "cmd_audio_test",
+    "cmd_loopback_test",
     "cmd_hotkey",
     "main",
 ]
@@ -64,10 +81,19 @@ __all__ = [
 # 全局参数的默认值，见《2-骨架与配置》命令行入口一节
 DEFAULT_CONFIG_ARG: str = "config/config.yaml"
 
-# hotkey 子动作到 socket action 的映射，取值见《2-骨架与配置》进程通信一节
+# hotkey 子动作到 socket action 的映射，取值见《2-骨架与配置》进程通信一节。
+# voice-start 与 voice-stop 是 AHK F8 按下/松开用的按住动作；
+# voice-toggle 保留向后兼容，CLI 手动调用仍可用；
+# project-mode-toggle、context-view-toggle、context-clear 对应
+# AHK F9/F10/F11 的一按一触发动作。
 _HOTKEY_ACTIONS: dict[str, str] = {
     "voice-toggle": "voice-toggle",
+    "voice-start": "voice-start",
+    "voice-stop": "voice-stop",
     "screenshot": "screenshot",
+    "project-mode-toggle": "project-mode-toggle",
+    "context-view-toggle": "context-view-toggle",
+    "context-clear": "context-clear",
 }
 
 # 等主进程退出的超时秒数
@@ -75,6 +101,10 @@ _STOP_TIMEOUT: float = 10.0
 
 # audio-test 采集时长，秒
 _AUDIO_TEST_SECONDS: float = 1.0
+
+# loopback-test 默认测试音频：scripts/windows/make-test-audio.cmd 合成的
+# 「解释一下什么是GDS」，16000 Hz / 16 bit / 单声道，约 3 秒
+DEFAULT_LOOPBACK_WAV: Path = REPO_ROOT / "tests" / "assets" / "asr-test-question.wav"
 
 # 设备类型标签，devices 命令用来区分系统回环与麦克风，
 # 见《5-语音输入与流式ASR》音频来源一节
@@ -141,6 +171,29 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("test", help="只读自检", parents=[common])
     subparsers.add_parser("devices", help="列出音频输入设备", parents=[common])
     subparsers.add_parser("audio-test", help="采集一小段音频并报告电平", parents=[common])
+    asr_replay_parser = subparsers.add_parser(
+        "asr-replay", help="把 wav 文件回放给 ASR 引擎并打印识别文本", parents=[common]
+    )
+    asr_replay_parser.add_argument("wav", help="wav 文件路径")
+    asr_replay_parser.add_argument(
+        "--block-ms", type=int, default=200, help="每次喂给引擎的毫秒数，默认 200"
+    )
+    loopback_parser = subparsers.add_parser(
+        "loopback-test",
+        help="外放测试音频并从系统回环采集，验证「播放→回环采集→ASR」链路",
+        parents=[common],
+    )
+    loopback_parser.add_argument(
+        "wav",
+        nargs="?",
+        default=str(DEFAULT_LOOPBACK_WAV),
+        help=f"wav 文件路径，默认 tests/assets/asr-test-question.wav",
+    )
+    loopback_parser.add_argument(
+        "--expected",
+        default=None,
+        help="期望文案，用于与识别文本对比（仅参考，不影响退出码）",
+    )
     hotkey_parser = subparsers.add_parser(
         "hotkey", help="触发快捷键动作", parents=[common]
     )
@@ -211,8 +264,8 @@ def _wait_for_exit(timeout: float = _STOP_TIMEOUT, interval: float = 0.2) -> boo
     return not is_server_alive(SOCKET_PATH)
 
 
-async def _probe_deepseek(config: AppConfig) -> tuple[bool, str]:
-    """真的探测一次 DeepSeek，返回 (是否通过, 说明)。
+async def _probe_model(config: AppConfig) -> tuple[bool, str]:
+    """真的探测一次模型服务，返回 (是否通过, 说明)。
 
     只在 ``providers.llm`` 指向真实实现时调用，会发一次网络请求。
     失败时说明里带错误码，取值见《2-骨架与配置》错误码表。
@@ -226,7 +279,7 @@ async def _probe_deepseek(config: AppConfig) -> tuple[bool, str]:
         except InterviewMateError as exc:
             return False, f"{exc.message} [{exc.code}]"
         except Exception as exc:
-            return False, f"{exc} [E_DEEPSEEK_STREAM]"
+            return False, f"{exc} [E_MODEL_STREAM]"
         supports_image = "是" if capability.supports_image else "否"
         return True, f"模型 {capability.model_id}，支持图片：{supports_image}"
     finally:
@@ -278,7 +331,7 @@ def cmd_warmup(args: argparse.Namespace) -> int:
             return EXIT_ERROR
         payload = dict(response.payload)
         print("主进程已处理 warmup 请求：", flush=True)
-        for key in ("asr", "deepseek", "dify"):
+        for key in ("asr", "model", "dify"):
             print(f"  {key}: {payload.get(key, '-')}", flush=True)
         if payload.get("note"):
             print(f"  说明：{payload['note']}", flush=True)
@@ -305,7 +358,7 @@ def cmd_warmup(args: argparse.Namespace) -> int:
     screenshot = asyncio.run(probe_screenshot_interface())
     print(f"  截图接口：{screenshot.detail}", flush=True)
     print(f"  ASR：mock（providers.asr={config.providers.asr}）", flush=True)
-    print(f"  DeepSeek：mock（providers.llm={config.providers.llm}）", flush=True)
+    print(f"  模型：mock（providers.llm={config.providers.llm}）", flush=True)
     print(f"  Dify：mock（providers.retrieval={config.providers.retrieval}）", flush=True)
     log_event("warmup.done", "主进程未运行，只做环境检查")
     return EXIT_OK
@@ -427,7 +480,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             audio=str(payload.get("audio", "off")),
             asr=str(payload.get("asr", "idle")),
             dify=str(payload.get("dify", "offline")),
-            deepseek=str(payload.get("deepseek", "idle")),
+            model=str(payload.get("model", "idle")),
             ttft_ms=float(ttft) if isinstance(ttft, (int, float)) else None,
         )
         text = HealthChecker().format_status(
@@ -460,9 +513,9 @@ def cmd_test(args: argparse.Namespace) -> int:
     """只读自检。
 
     检查配置能否加载并通过校验、依赖包能否导入、音频设备能否枚举、截图接口能否探测、
-    ASR 能否加载，再按 ``providers`` 决定要不要探测 DeepSeek 与 Dify。
+    ASR 能否加载，再按 ``providers`` 决定要不要探测模型服务与 Dify。
     ``providers`` 指向 mock 的能力不连真实服务，对应项打印 ``mock``；
-    ``providers.llm=deepseek`` 时真的探测一次 DeepSeek，失败项带错误码。
+    ``providers.llm=openai`` 时真的探测一次模型服务，失败项带错误码。
     全部通过退出码 0，有失败项退出码 1。
 
     :param args: 解析后的参数。
@@ -511,13 +564,13 @@ def cmd_test(args: argparse.Namespace) -> int:
         )
 
     if config.providers.llm == "mock":
-        _print_item("mock", "DeepSeek 探测", "providers.llm=mock，不连真实服务")
+        _print_item("mock", "模型探测", "providers.llm=mock，不连真实服务")
     else:
-        ok, detail = asyncio.run(_probe_deepseek(config))
+        ok, detail = asyncio.run(_probe_model(config))
         if ok:
-            _print_item("ok", "DeepSeek 探测", detail)
+            _print_item("ok", "模型探测", detail)
         else:
-            failed |= not _print_item("FAIL", "DeepSeek 探测", detail)
+            failed |= not _print_item("FAIL", "模型探测", detail)
 
     if config.providers.retrieval == "mock":
         _print_item("mock", "Dify 探测", "providers.retrieval=mock，不连真实服务")
@@ -527,8 +580,8 @@ def cmd_test(args: argparse.Namespace) -> int:
         )
 
     # 必填环境变量只在 providers.llm 指向真实实现时提示：
-    # mock 模式不提示缺 DEEPSEEK_API_KEY，也不影响退出码
-    if config.providers.llm == "deepseek":
+    # mock 模式不提示缺 MODEL_API_KEY，也不影响退出码
+    if config.providers.llm == "openai":
         missing_env = missing_required_env(args.env_file)
         if missing_env:
             _print_item(
@@ -701,6 +754,197 @@ def _write_wav(samples: Any, sample_rate: int) -> Path:
     return path
 
 
+def cmd_asr_replay(args: argparse.Namespace) -> int:
+    """把一个 wav 文件交给 SenseVoice 重识别，打印最终识别文本。
+
+    与产品链路一致：整段音频重识别（use_itn=True）加拼音级热词纠正，
+    产出最终文本，见《5-语音输入与流式ASR》「重识别与热词纠正」一节。
+    模型加载约 10 秒。用于区分「识别不准」是模型问题还是音频链路问题：
+    同一段音频回放结果稳定而麦克风识别差，问题就在采集链路。
+    ``--block-ms`` 对整段识别无效，保留参数只为命令行兼容。
+
+    :param args: 解析后的参数。
+    :returns: 退出码。
+    """
+
+    try:
+        config = load_app_config(args.config, args.env_file)
+    except ConfigError as exc:
+        print(f"E_CONFIG：{exc.message}", flush=True)
+        log_event("config.error", "配置读取失败", level="ERROR", error=exc.message)
+        return EXIT_CONFIG_ERROR
+    _setup_logging_for(config)
+
+    if config.providers.asr != "funasr":
+        print("E_ASR_LOAD：asr-replay 需要 providers.asr=funasr", flush=True)
+        return EXIT_ERROR
+
+    wav_path = Path(args.wav)
+    if not wav_path.is_file():
+        print(f"E_ASR_LOAD：wav 文件不存在：{wav_path}", flush=True)
+        log_event("asr.replay.failed", "wav 文件不存在", level="ERROR", path=str(wav_path))
+        return EXIT_ERROR
+
+    async def _run() -> str:
+        refiner = select_final_refiner(config)
+        if refiner is None:
+            raise AsrLoadError("providers.asr=funasr 时重识别引擎必须可用")
+        await refiner.ensure_loaded()
+        # 读 wav、下混、重采样到 16000 Hz，归一化成 float32 后整段识别
+        pcm = load_wav_int16_mono(wav_path, target_rate=DEFAULT_SAMPLE_RATE)
+        return await refiner.recognize(pcm_int16_to_float32(pcm))
+
+    try:
+        text = asyncio.run(_run())
+    except InterviewMateError as exc:
+        print(f"{exc.code}：{exc.message}", flush=True)
+        log_event("asr.replay.failed", "回放识别失败", level="ERROR", code=exc.code)
+        return EXIT_ERROR
+
+    print(f"识别文本：{text}", flush=True)
+    log_event("asr.replay.done", "回放识别完成", text=text)
+    return EXIT_OK
+
+
+def cmd_loopback_test(args: argparse.Namespace) -> int:
+    """回环链路一键自检：外放合成音频 + 回环采集 + ASR 识别 + 打印结论。
+
+    经系统默认输出设备外放一段 wav（默认测试音频约 3 秒），同时从默认
+    扬声器的 WASAPI loopback 端点采集系统声音，采集到的波形喂给 FunASR
+    引擎识别，再打印电平（峰值/RMS）、识别文本与结论。识别出非空文本，
+    或至少录到明显电平，链路算通，退出码 0；设备、依赖或引擎失败退出码
+    1 并带错误码；全程静音也按验证未通过退出 1。
+
+    与 ``asr-replay`` 互补：replay 绕过声卡，本命令走的是真实回环采集链路。
+    模型加载约 10 秒，播放会外放约 wav 时长的声音。
+
+    :param args: 解析后的参数。
+    :returns: 退出码。
+    """
+    try:
+        config = load_app_config(args.config, args.env_file)
+    except ConfigError as exc:
+        print(f"E_CONFIG：{exc.message}", flush=True)
+        log_event("config.error", "配置读取失败", level="ERROR", error=exc.message)
+        return EXIT_CONFIG_ERROR
+    _setup_logging_for(config)
+
+    if config.providers.asr != "funasr":
+        print("E_ASR_LOAD：loopback-test 需要 providers.asr=funasr", flush=True)
+        log_event(
+            "audio.loopback_test.failed",
+            "providers.asr 不是 funasr",
+            level="ERROR",
+            code="E_ASR_LOAD",
+        )
+        return EXIT_ERROR
+
+    wav_path = Path(args.wav)
+    if not wav_path.is_file():
+        print(f"E_ASR_LOAD：wav 文件不存在：{wav_path}", flush=True)
+        log_event(
+            "audio.loopback_test.failed",
+            "wav 文件不存在",
+            level="ERROR",
+            path=str(wav_path),
+            code="E_ASR_LOAD",
+        )
+        return EXIT_ERROR
+
+    try:
+        devices = list_input_devices()
+    except InterviewMateError as exc:
+        print(f"E_AUDIO_DEVICE：枚举音频设备失败：{exc.message}", flush=True)
+        log_event(
+            "audio.loopback_test.failed",
+            "枚举音频设备失败",
+            level="ERROR",
+            code="E_AUDIO_DEVICE",
+            error=exc.message,
+        )
+        return EXIT_ERROR
+    except NotImplementedError as exc:
+        print(f"E_AUDIO_DEVICE：{exc}", flush=True)
+        log_event(
+            "audio.loopback_test.failed",
+            "平台的音频后端还没实现",
+            level="ERROR",
+            code="E_AUDIO_DEVICE",
+        )
+        return EXIT_ERROR
+
+    loopbacks = [device for device in devices if device.is_loopback]
+    if not loopbacks:
+        print("E_AUDIO_DEVICE：本机没有可用的系统回环设备", flush=True)
+        log_event(
+            "audio.loopback_test.failed",
+            "本机没有系统回环设备",
+            level="ERROR",
+            code="E_AUDIO_DEVICE",
+        )
+        return EXIT_ERROR
+    # 优先默认扬声器的回环端点：外放走默认输出设备，回环也得是它的
+    target = next((device for device in loopbacks if device.is_default), loopbacks[0])
+    print(
+        f"回环设备：[{target.index}] {target.name}{'（默认）' if target.is_default else ''}",
+        flush=True,
+    )
+    print(f"测试音频：{wav_path}", flush=True)
+    print("模型加载约 10 秒；播放会外放约 wav 时长的声音……", flush=True)
+
+    async def _run() -> LoopbackTestResult:
+        """装配真实引擎、播放器与回环采集器，跑一次回环自检。"""
+        engine = select_asr_engine(config)
+        backend = get_platform().audio
+        recorder = LoopbackCaptureRecorder(
+            backend,
+            device=target.index,
+            sample_rate=config.audio.sample_rate,
+        )
+        player = SoundDevicePlayer()
+        return await run_loopback_test(
+            wav_path, engine, player, recorder, expected=args.expected
+        )
+
+    try:
+        result = asyncio.run(_run())
+    except InterviewMateError as exc:
+        print(f"{exc.code}：{exc.message}", flush=True)
+        log_event(
+            "audio.loopback_test.failed",
+            "回环链路自检失败",
+            level="ERROR",
+            code=exc.code,
+            error=exc.message,
+        )
+        return EXIT_ERROR
+    except ValueError as exc:
+        print(f"E_ASR_LOAD：wav 无法解析：{exc}", flush=True)
+        log_event(
+            "audio.loopback_test.failed",
+            "wav 无法解析",
+            level="ERROR",
+            error=str(exc),
+            code="E_ASR_LOAD",
+        )
+        return EXIT_ERROR
+
+    print(f"播放时长：{result.played_seconds:.1f} 秒", flush=True)
+    print(f"采集时长：{result.captured_seconds:.1f} 秒", flush=True)
+    print(f"电平峰值：{result.peak:.4f}", flush=True)
+    print(f"RMS：{result.rms:.4f}", flush=True)
+    print(f"识别文本：{result.text if result.text else '（空）'}", flush=True)
+    if result.expected is not None:
+        match_text = (
+            "一致" if result.expected_match else "不一致（仅参考，不影响结论）"
+        )
+        print(f"期望文案：{result.expected}（自动对比：{match_text}）", flush=True)
+    else:
+        print("期望文案：未提供（可用 --expected 指定，用于人工对比）", flush=True)
+    print(f"结论：{result.conclusion}", flush=True)
+    return EXIT_OK if result.ok else EXIT_ERROR
+
+
 def cmd_hotkey(args: argparse.Namespace) -> int:
     """触发一个快捷键动作。
 
@@ -758,6 +1002,8 @@ _COMMANDS = {
     "test": cmd_test,
     "devices": cmd_devices,
     "audio-test": cmd_audio_test,
+    "asr-replay": cmd_asr_replay,
+    "loopback-test": cmd_loopback_test,
     "hotkey": cmd_hotkey,
 }
 

@@ -5,7 +5,8 @@
 - 检索：按 ``providers.retrieval`` 选实现，检索成功时上下文进模型请求、
   来源条目送到界面；检索失败或 Dify 没配好时不崩掉，请求照常发，
   状态栏的 DIFY 变 degraded，见《6-Dify检索与项目知识》检索流程与故障降级两节；
-- 语音：socket 的 ``voice-toggle`` 动作真的开流与关流，停止后最终文本自动提交，
+- 语音：socket 的 ``voice-toggle`` 与按住动作 ``voice-start``/``voice-stop``
+  真的开流与关流，停止后最终文本自动提交，
   部分结果只作临时显示，见《5-语音输入与流式ASR》F8 交互与部分结果和最终结果两节；
 - 收尾：``stop`` 动作先停音频采集再退出界面，
   见《2-骨架与配置》进程通信一节；
@@ -32,8 +33,8 @@ import app.config
 import app.main
 from app.audio.funasr_engine import FunASREngine
 from app.config import AppConfig
-from app.llm.deepseek_client import DeepSeekClient
-from app.llm.question_classifier_client import DeepSeekQuestionClassifier
+from app.llm.openai_compat_client import OpenAICompatClient
+from app.llm.question_classifier_client import OpenAICompatQuestionClassifier
 from app.main import EXIT_OK
 from app.platform import get_platform
 from app.platform.types import AudioDevice
@@ -302,14 +303,14 @@ def test_default_config_uses_real_providers() -> None:
     """默认配置里四个 provider 都是真实取值。"""
     config = app.config.load_config()
 
-    assert config.providers.llm == "deepseek"
+    assert config.providers.llm == "openai"
     assert config.providers.retrieval == "dify"
     assert config.providers.asr == "funasr"
     assert config.providers.screenshot == "mss"
 
 
-async def test_default_config_selects_deepseek_client() -> None:
-    """默认配置选出的模型客户端是 DeepSeekClient。
+async def test_default_config_selects_openai_compat_client() -> None:
+    """默认配置选出的模型客户端是 OpenAICompatClient。
 
     只构造不探测：构造不发网络请求，也不加载模型。
     """
@@ -318,7 +319,7 @@ async def test_default_config_selects_deepseek_client() -> None:
     client = app.main.select_client(config)
 
     try:
-        assert isinstance(client, DeepSeekClient)
+        assert isinstance(client, OpenAICompatClient)
     finally:
         await app.main.close_client(client)
 
@@ -367,8 +368,15 @@ def test_select_retriever_picks_mock_implementation() -> None:
 
 
 def test_select_retriever_picks_dify_implementation() -> None:
-    """providers.retrieval=dify 时选 Dify，连接参数取配置里的值。"""
-    config = _config(retrieval="dify")
+    """providers.retrieval=dify 时选 Dify，连接参数取配置里的值。
+
+    ``dify`` 段给显式占位值：默认配置里该段已 env 化留空
+    （未配置时按 offline 处理），本用例只验证实现选择与参数透传。
+    """
+    config = _config(
+        retrieval="dify",
+        dify={"base_url": "http://dify.test/v1", "dataset_id": "ds-1", "api_key": "key-1"},
+    )
 
     retriever = app.main.select_retriever(config)
 
@@ -553,6 +561,55 @@ async def test_voice_toggle_publishes_audio_and_asr_state() -> None:
     assert ui.statuses[-1]["asr"] == "ready"
 
 
+async def test_voice_start_and_stop_actions_drive_the_capture() -> None:
+    """voice-start/voice-stop 动作走按住语义：按下开流，松开冲刷提交。
+
+    AHK 的 F8 按下与松开经 socket 送到 build_handlers 注册的两个动作上，
+    已在采集时按下被忽略，没在采集时松开是空操作。
+    """
+    ui = FakeApp()
+    manager = FakeManager()
+    state = app.main.MainState()
+    capture = FakeCapture(ui.events)
+    engine = FakeEngine()
+    voice = _voice_chain(ui, manager, state, capture, engine)
+    state.attach_app(ui)
+    handlers = app.main.build_handlers(state)
+
+    started = await handlers["voice-start"](
+        Request(action="voice-start", request_id="req-1")
+    )
+    assert started["result"] == "started"
+    assert started["audio"] == "on"
+    assert capture.started == 1
+
+    # 按住期间的重复按下：已在采集，忽略，不再开一次流
+    repeated = await handlers["voice-start"](
+        Request(action="voice-start", request_id="req-2")
+    )
+    assert repeated["result"] == "ignored"
+    assert capture.started == 1
+
+    await engine.fed.wait()
+    stopped = await handlers["voice-stop"](
+        Request(action="voice-stop", request_id="req-3")
+    )
+    assert stopped["result"] == "stopped"
+    assert stopped["audio"] == "off"
+    assert stopped["text"] == "你好，请介绍一下项目"
+    assert capture.stopped == 1
+    for task in voice.submit_tasks:
+        await task
+    assert manager.submissions == ["你好，请介绍一下项目"]
+
+    # 没在采集时松开：空操作，不碰采集器
+    again = await handlers["voice-stop"](
+        Request(action="voice-stop", request_id="req-4")
+    )
+    assert again["result"] == "ignored"
+    assert capture.stopped == 1
+
+
 # ----------------------------------------------------------------------
 # 语音开关去抖：同一次按键被两条路径各触发一次时只切换一次
 # ----------------------------------------------------------------------
@@ -663,7 +720,7 @@ async def test_warmup_reports_mock_markers_when_providers_are_mock() -> None:
     payload = await state.warmup_payload()
 
     assert payload["asr"] == "mock"
-    assert payload["deepseek"] == "mock"
+    assert payload["model"] == "mock"
     assert payload["dify"] == "mock"
 
 
@@ -779,21 +836,21 @@ async def test_mock_provider_assembles_without_model_classifier() -> None:
     assert not hasattr(client, "complete_json")
 
 
-async def test_deepseek_provider_assembles_model_classifier() -> None:
-    """providers.llm=deepseek 时注入模型判定器，判定结果生效。"""
+async def test_model_provider_assembles_model_classifier() -> None:
+    """providers.llm=openai 时注入模型判定器，判定结果生效。"""
     ui = FakeApp()
-    config = _config(llm="deepseek")
+    config = _config(llm="openai")
     client = FakeClassifierClient(
-        '{"type": "conceptual", "need_rag": false, "reason": "通用知识"}'
+        '{"type": "conceptual", "project_scope": "none", "reason": "通用知识"}'
     )
 
     manager = app.main.assemble_manager(config, client, ui)
     await manager.submit_text(QUESTION_PROJECT)
 
-    assert isinstance(manager._llm_classifier, DeepSeekQuestionClassifier)
+    assert isinstance(manager._llm_classifier, OpenAICompatQuestionClassifier)
     session = manager.current_session
     assert session is not None
-    # 规则会判 project/true，模型判定把它覆盖成 conceptual/false
+    # 规则会判 project/检索，模型判定把它覆盖成 conceptual/none（不检索）
     assert session.question_type == "conceptual"
     assert session.rag_required is False
     assert len(client.complete_calls) == 1

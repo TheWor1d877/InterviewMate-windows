@@ -13,6 +13,7 @@ from typing import Any
 from rich.cells import cell_len
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from app.config import HotkeySettings
@@ -22,6 +23,7 @@ __all__ = [
     "HotkeyHints",
     "HOTKEY_SEPARATOR",
     "EXIT_HINT",
+    "PROJECT_HOTKEY_ITEMS",
     "build_hotkey_items",
     "key_label",
 ]
@@ -33,6 +35,16 @@ HOTKEY_SEPARATOR = " · "
 # 右下角固定显示的退出键。配置里的 quit 键是 q，输入框有焦点时 q 是字母，
 # 所以这里显示一直可用的 Ctrl+Q。
 EXIT_HINT = "Ctrl+Q 退出"
+
+# 项目模式下的快捷键提示，键位固定，不取配置里的 hotkeys 段：
+# F7 截图、F8 标记问题并提交、F9 退出项目模式、F10 上下文视图、F11 重开一轮。
+PROJECT_HOTKEY_ITEMS: list[tuple[str, str]] = [
+    ("F7", "截图"),
+    ("F8", "标记问题并提交"),
+    ("F9", "退出项目模式"),
+    ("F10", "上下文"),
+    ("F11", "重开一轮"),
+]
 
 
 def key_label(raw: str) -> str:
@@ -79,6 +91,14 @@ class HotkeyHints(Static):
         self._items: list[tuple[str, str]] = list(items)
         super().__init__("", markup=False, **kwargs)
 
+    def set_items(self, items: list[tuple[str, str]]) -> None:
+        """整体替换提示项，模式切换时用。
+
+        :param items: 新的提示项列表。
+        """
+        self._items = list(items)
+        self.refresh()
+
     def render(self) -> str:
         """返回放得下的那几项提示。"""
         width = self.size.width or 0
@@ -95,7 +115,11 @@ class HotkeyHints(Static):
 
 
 class HotkeyBar(Horizontal):
-    """底部快捷键提示栏。"""
+    """底部快捷键提示栏。
+
+    普通模式显示配置里的键位，项目模式显示项目模式键位，
+    由界面在切换模式时调 :meth:`set_mode` 换过去。
+    """
 
     def __init__(
         self,
@@ -104,11 +128,34 @@ class HotkeyBar(Horizontal):
         **kwargs: Any,
     ) -> None:
         # 属性要在 super().__init__ 之前赋值，Textual 允许子类这样做
+        # 普通模式的提示项留着，退出项目模式时恢复
+        self._normal_items: list[tuple[str, str]] = list(items)
         self._items: list[tuple[str, str]] = list(items)
         self._exit_hint: str = exit_hint
+        self._mode: str = "normal"
         super().__init__(**kwargs)
 
     def compose(self) -> ComposeResult:
         """产出左边提示列表与右边的退出键提示。"""
         yield HotkeyHints(self._items, id="hotkey-main")
         yield Static(self._exit_hint, markup=False, id="hotkey-exit")
+
+    def set_mode(self, mode: str) -> None:
+        """切换提示项：项目模式显示项目模式键位，普通模式恢复配置键位。
+
+        :param mode: ``project`` 或 ``normal``，其它取值按普通模式处理。
+        """
+        self._mode = mode if mode == "project" else "normal"
+        items = PROJECT_HOTKEY_ITEMS if self._mode == "project" else self._normal_items
+        self._items = list(items)
+        try:
+            self.query_one("#hotkey-main", HotkeyHints).set_items(self._items)
+        except NoMatches:
+            # 子部件还没挂上，compose 时会用最新的 items
+            pass
+        self.refresh()
+
+    @property
+    def mode(self) -> str:
+        """当前提示模式：``normal`` 或 ``project``。"""
+        return self._mode

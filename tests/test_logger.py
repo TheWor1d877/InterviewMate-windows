@@ -1,7 +1,7 @@
 """日志封装与脱敏的测试。
 
 覆盖《2-骨架与配置》日志一节的级别、固定字段、脱敏规则与落盘路径，
-以及《8-集成与验收》验收约束里「日志文件里搜不到 DEEPSEEK_API_KEY 的值和
+以及《8-集成与验收》验收约束里「日志文件里搜不到 MODEL_API_KEY 的值和
 Authorization 头的值」这一条。
 """
 
@@ -604,7 +604,7 @@ def test_log_event_invalid_level_raises() -> None:
 
 def test_log_file_contains_no_secret(tmp_path: Path) -> None:
     """日志文件里搜不到 API Key 的值和 Authorization 头的值。"""
-    api_key = "sk-deepseek-key-000111"
+    api_key = "sk-model-key-000111"
     auth_value = "bearer-token-value-222"
 
     path = setup_logging("INFO", log_dir=tmp_path)

@@ -15,7 +15,7 @@
 两个词按词边界匹配，model 这类子串不算命中。
 判定不按题型字符串判断。
 
-方法签名与 :class:`~app.llm.deepseek_client.DeepSeekClient` 一致，
+方法签名与 :class:`~app.llm.openai_compat_client.OpenAICompatClient` 一致，
 上层按 ``providers.llm`` 切换实现时不用改调用方式。
 """
 
@@ -28,7 +28,7 @@ import re
 from typing import Any, AsyncIterator
 
 from app.config import AppConfig
-from app.llm.deepseek_client import ModelCapability
+from app.llm.openai_compat_client import ModelCapability
 from app.llm.prompt_coding import CODING_REQUEST_MARKER, detect_submission_mode
 
 __all__ = ["MockClient"]

@@ -9,7 +9,7 @@
   不能写 ``model_dir``：funasr 只在 kwargs 里存在 ``model_path`` 时才跳过 hub 下载，
   ``model_dir`` 不参与这个判断，权重会被重新拉进 modelscope 缓存。
 - 两个实例整个进程生命周期内只初始化一次，之后一直复用同一个实例。
-- 采集回调出的 200 毫秒块先攒够 600 毫秒（9600 点）再送模型，
+- 采集回调出的 200 毫秒块攒满 200 毫秒（3200 点）就送模型，
   一次调用只传一段波形，``batch_size`` 固定为 1。
 - 每条语音流一个 ``cache`` 字典，同一条流内所有块共用；
   冲刷完丢掉这个字典，下一条语音流重新建一个。
@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -40,6 +41,8 @@ if TYPE_CHECKING:
 __all__ = [
     "FunASREngine",
     "ModelFactory",
+    "MODEL_REGISTRY_NAMES",
+    "resolve_model_names",
     "DEFAULT_MODEL_DIR",
     "DEFAULT_ASR_MODEL_NAME",
     "DEFAULT_VAD_MODEL_NAME",
@@ -48,6 +51,7 @@ __all__ = [
     "MODEL_CHUNK_SAMPLES",
     "MAX_STREAM_DURATION_SECONDS",
     "MAX_PENDING_SAMPLES",
+    "MAX_RECORDING_SAMPLES",
     "STREAM_CHUNK_SIZE",
     "ENCODER_CHUNK_LOOK_BACK",
     "DECODER_CHUNK_LOOK_BACK",
@@ -70,22 +74,47 @@ DEFAULT_MODEL_DIR: Path = Path.home() / "models"
 DEFAULT_ASR_MODEL_NAME: str = "paraformer-zh-streaming"
 DEFAULT_VAD_MODEL_NAME: str = "fsmn-vad"
 
+# 本地模型目录名（ModelScope 仓库名）→ FunASR 注册表名。
+#
+# 这两个名字不是一回事：目录名是仓库名，注册表名才是
+# funasr.register.tables 里登记的类名，也就是模型目录 ``config.yaml``
+# 首行 ``model:`` 的取值。把目录名原样传给 ``AutoModel(model=...)``
+# 会报 ``model '...' is not registered``。
+MODEL_REGISTRY_NAMES: dict[str, str] = {
+    "paraformer-zh-streaming": "ParaformerStreaming",
+    "fsmn-vad": "FsmnVADStreaming",
+}
+
+# 反过来查：注册表名 → 本地目录名，允许配置直接写注册表名
+_MODEL_DIR_NAMES: dict[str, str] = {
+    registry: dir_name for dir_name, registry in MODEL_REGISTRY_NAMES.items()
+}
+
 # 采样率，采集层与模型都按 16000 Hz 走，
 # 见《5-语音输入与流式ASR》「采集参数」一节
 DEFAULT_SAMPLE_RATE: int = 16000
 
-# 送进模型的块长：600 毫秒 = 16000 × 0.6 = 9600 点，
-# 见《接口契约》「FunASR 音频块参数」一节
-MODEL_CHUNK_DURATION_MS: int = 600
-MODEL_CHUNK_SAMPLES: int = 9600
+# 送进模型的块长：200 毫秒 = 16000 × 0.2 = 3200 点，
+# 见《接口契约》「FunASR 音频块参数」一节。
+# 原为 600 毫秒（9600 点）：聚合等待占出字延迟约 87%（见 WIN-MILESTONES M9），
+# 下调到 200 毫秒换取更快出字，推理频次 ×3 后 GPU 占空比仍约 10%，
+# 模型内部的 chunk_size 窗口不受影响，见《接口契约》「FunASR 音频块参数」一节
+MODEL_CHUNK_DURATION_MS: int = 200
+MODEL_CHUNK_SAMPLES: int = 3200
 
 # 一条语音流的最长时长上限。超过就丢掉最早的缓存重新建一个，
 # 见《5-语音输入与流式ASR》「性能」一节的缓存长度限制
 MAX_STREAM_DURATION_SECONDS: int = 300
 
-# 待解码缓冲的点数上限。攒不够 600 毫秒时音频先放这里，
+# 待解码缓冲的点数上限。攒不够 200 毫秒时音频先放这里，
 # 超过上限就把最早的丢掉
 MAX_PENDING_SAMPLES: int = MODEL_CHUNK_SAMPLES * 2
+
+# 整段录音缓存的点数上限，与语音流上限同源（300 秒）：
+# 为 SenseVoice 重识别缓存当前录音会话的整段 PCM，
+# 见《5-语音输入与流式ASR》「重识别与热词纠正」一节。
+# 超过上限丢最早的音频，重识别只覆盖最近上限时长内的内容
+MAX_RECORDING_SAMPLES: int = MAX_STREAM_DURATION_SECONDS * DEFAULT_SAMPLE_RATE
 
 # 流式推理的固定参数组合，见《5-语音输入与流式ASR》「流式推理」一节
 STREAM_CHUNK_SIZE: list[int] = [0, 10, 5]
@@ -193,6 +222,27 @@ def _extract_intervals(result: Any) -> list[tuple[int, int]]:
     return intervals
 
 
+def resolve_model_names(model_name: str) -> tuple[str, str]:
+    """把模型名解析成「注册表名」与「本地目录名」。
+
+    ``asr.model`` 允许两种写法，两种都能用：
+
+    - 目录名，例如 ``paraformer-zh-streaming``。旧的默认值，兼容保留；
+    - 注册表名，例如 ``ParaformerStreaming``。
+
+    都不认识的取值原样返回两遍，目录名与注册表名都按它自己算，
+    这样用户放一个自定义目录也能用。
+
+    :param model_name: 配置或调用方给的模型名。
+    :returns: ``(注册表名, 本地目录名)``。
+    """
+    if model_name in MODEL_REGISTRY_NAMES:
+        return MODEL_REGISTRY_NAMES[model_name], model_name
+    if model_name in _MODEL_DIR_NAMES:
+        return model_name, _MODEL_DIR_NAMES[model_name]
+    return model_name, model_name
+
+
 def _drop_load_result(task: "asyncio.Future[None]") -> None:
     """加载任务结束时把异常取出来。
 
@@ -269,9 +319,15 @@ class FunASREngine:
         self._state: str = STATE_LOADING
         # 当前语音流的 cache 字典，同一条流内所有块共用这一个
         self._cache: dict[str, Any] = {}
-        # 还没攒够 600 毫秒的音频点
+        # 还没攒够 200 毫秒的音频点
         self._pending: list["np.ndarray"] = []
         self._pending_size: int = 0
+        # 待解码缓冲最早一块的到来时刻，解码触发时用来报缓冲等待
+        self._pending_since: float | None = None
+        # 整段录音缓存：当前录音会话的全部 PCM，松开按键后取走交给
+        # SenseVoice 重识别，见《5-语音输入与流式ASR》「重识别与热词纠正」
+        self._recording: list["np.ndarray"] = []
+        self._recording_samples: int = 0
         # 当前语音流已经调过几次模型，用来判断冲刷时要不要再调一次
         self._calls: int = 0
         # 当前语音流累计进来的音频点数，用来判断要不要裁剪缓存
@@ -529,6 +585,10 @@ class FunASREngine:
     def _build_model(self, model_name: str, device: str) -> Any:
         """建一个模型实例。
 
+        ``model_name`` 可以写目录名也可以写注册表名，先用
+        :func:`resolve_model_names` 拆成两样再分别用：注册表名给 ``model``，
+        目录名拼进 ``model_path``。
+
         本地目录用 ``model_path`` 传，不能写 ``model_dir``：
         funasr 只在 kwargs 里存在 ``model_path`` 时才跳过 hub 下载，
         ``model_dir`` 不参与这个判断，权重会被重新拉进 modelscope 缓存。
@@ -537,13 +597,28 @@ class FunASREngine:
         ``inference_with_vad``，把列表形式的 ``chunk_size`` 原样透传给 VAD，
         而两种模型的 ``chunk_size`` 类型互斥，会抛 TypeError。
         """
-        model_path = str(self._model_dir / model_name)
+        registry_model, dir_name = resolve_model_names(model_name)
+        model_path = self._model_dir / dir_name
+        if not model_path.is_dir():
+            # 目录不在时 funasr 读不到本地 config.yaml，注册名不会被纠正，
+            # 最后只会报 model '...' is not registered。先把实际路径写出来，
+            # 免得只看到一句「未注册」不知道模型该放哪。
+            log_event(
+                "asr.model.path_missing",
+                f"本地模型目录不存在：{model_path}（模型 {model_name}）",
+                level="WARNING",
+                model=model_name,
+                registry_model=registry_model,
+                model_path=str(model_path),
+            )
         if self._model_factory is not None:
-            return self._model_factory(model=model_name, model_path=model_path, device=device)
+            return self._model_factory(
+                model=registry_model, model_path=str(model_path), device=device
+            )
         # funasr 的导入很慢，放到这里按需导入
         from funasr import AutoModel
 
-        return AutoModel(model=model_name, model_path=model_path, device=device)
+        return AutoModel(model=registry_model, model_path=str(model_path), device=device)
 
     def _instances_ready(self) -> bool:
         """模型实例是不是已经建好了。"""
@@ -556,7 +631,7 @@ class FunASREngine:
     def _check_sample_rate(self, block: Any) -> None:
         """块的采样率不是 16000 Hz 时记一条日志。
 
-        块长按 16000 Hz 算出来的，采样率不对时 9600 点就不是 600 毫秒，
+        块长按 16000 Hz 算出来的，采样率不对时 3200 点就不是 200 毫秒，
         这里只记日志提醒，不改块的内容。
         """
         sample_rate = getattr(block, "sample_rate", None)
@@ -576,7 +651,7 @@ class FunASREngine:
     async def feed(self, block: "AudioBlock | Any") -> str:
         """喂一块 200 毫秒的音频，返回这次解码出的增量文本。
 
-        块里不够 600 毫秒就先攒着，攒够 9600 点才调一次模型。
+        块里不够 200 毫秒就先攒着，攒够 3200 点才调一次模型。
         返回的是本次调用解码出的片段，不保证是完整句子，
         整句由多次结果按顺序拼接得到。
 
@@ -590,15 +665,37 @@ class FunASREngine:
 
         self._check_sample_rate(block)
         samples = _to_float32_1d(_block_samples(block))
+        # 缓冲为空时记下最早一块的到来时刻，解码触发时报缓冲等待
+        if self._pending_size == 0:
+            self._pending_since = time.perf_counter()
         self._pending.append(samples)
         self._pending_size += int(samples.size)
         self._stream_samples += int(samples.size)
+        # 同一块音频追加进整段录音缓存，松开按键后交给重识别
+        self._recording.append(samples)
+        self._recording_samples += int(samples.size)
         # 缓存与待解码缓冲都有上限，超了就把最早的丢掉
         self._trim_pending()
         self._trim_stream()
+        self._trim_recording()
 
         parts: list[str] = []
         if self._pending_size >= MODEL_CHUNK_SAMPLES:
+            # 缓冲攒满 200 毫秒触发解码，报一下这段音频攒了多久：
+            # 出字延迟里大头是这段聚合等待，留个观测量方便后续调阈值
+            buffered_wait_ms = (
+                (time.perf_counter() - self._pending_since) * 1000.0
+                if self._pending_since is not None
+                else 0.0
+            )
+            log_event(
+                "asr.decode.buffer_wait",
+                "待解码缓冲攒满，触发一次解码",
+                level="DEBUG",
+                pending_samples=self._pending_size,
+                buffered_wait_ms=round(buffered_wait_ms, 1),
+                device=self._device or "",
+            )
             timer = timed(
                 ASR_LATENCY_METRIC,
                 source=self._device or "",
@@ -610,6 +707,10 @@ class FunASREngine:
                     text = await asyncio.to_thread(self._decode, chunk, False)
                     if text:
                         parts.append(text)
+            # 缓冲没取空时剩下的音频从现在重新起算等待
+            self._pending_since = (
+                time.perf_counter() if self._pending_size > 0 else None
+            )
         return "".join(parts)
 
     async def flush(self) -> str:
@@ -651,8 +752,62 @@ class FunASREngine:
         self._cache = {}
         self._pending.clear()
         self._pending_size = 0
+        self._pending_since = None
         self._calls = 0
         self._stream_samples = 0
+        # 录音缓存一并丢掉：正常路径里调用方在冲刷前已把录音取走交给
+        # 重识别，这里是解码异常时的兜底，缓存不留给下一条语音流
+        self._recording.clear()
+        self._recording_samples = 0
+
+    def take_recording(self) -> "np.ndarray":
+        """取走当前录音会话的整段 PCM 缓存，下次录音重新积累。
+
+        给 SenseVoice 重识别用：流式解码照常跑，这段缓存独立累积，
+        松开按键后调用方在 :meth:`flush` 之前取走它，重识别用整段
+        音频重新出文本。冲刷（:meth:`_reset_stream`）时缓存会被清掉，
+        所以必须在冲刷之前取。
+
+        :returns: float32 的一维波形，一段音频都没喂过时是空数组。
+        """
+        if not self._recording:
+            return np.zeros(0, dtype="float32")
+        if len(self._recording) == 1:
+            wave = self._recording[0]
+        else:
+            wave = np.concatenate(self._recording)
+        self._recording.clear()
+        self._recording_samples = 0
+        return wave
+
+    def _trim_recording(self) -> None:
+        """整段录音缓存超过上限时把最早的丢掉。
+
+        与语音流缓存同上限（``max_stream_seconds`` 秒）：长会议不吃内存，
+        重识别只覆盖最近上限时长内的音频。丢掉的部分流式解码同样
+        已经丢过缓存，两边口径一致。
+        """
+        if self._recording_samples <= self._max_stream_samples:
+            return
+        excess = self._recording_samples - self._max_stream_samples
+        dropped = 0
+        while dropped < excess and self._recording:
+            head = self._recording[0]
+            need = excess - dropped
+            if head.size > need:
+                self._recording[0] = head[need:]
+                dropped += int(need)
+            else:
+                dropped += int(head.size)
+                self._recording.pop(0)
+        self._recording_samples -= dropped
+        log_event(
+            "asr.recording.trimmed",
+            "整段录音缓存超过上限，丢弃最早的音频",
+            level="WARNING",
+            dropped_samples=dropped,
+            limit_samples=self._max_stream_samples,
+        )
 
     def _trim_pending(self) -> None:
         """待解码缓冲超过上限时把最早的丢掉。
@@ -703,6 +858,7 @@ class FunASREngine:
         :returns: 这一段解码出的文本。
         :raises AsrDecodeError: 解码失败。
         """
+
         try:
             result = self._asr.generate(
                 input=chunk,
@@ -726,6 +882,7 @@ class FunASREngine:
             raise AsrDecodeError(f"ASR 解码失败：{exc}") from exc
         self._state = STATE_READY
         self._calls += 1
+
         return _extract_text(result)
 
     def _take(self, count: int) -> "np.ndarray":

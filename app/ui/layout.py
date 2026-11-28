@@ -21,6 +21,7 @@ from textual.css.query import NoMatches
 from textual.events import Resize
 
 from app.config import AppConfig
+from app.ui.panels.dialogue_temp import DialogueTempPanel
 from app.ui.panels.hotkey_bar import HotkeyBar, build_hotkey_items
 from app.ui.panels.input_panel import QuestionInputPanel
 from app.ui.panels.navigation_panel import NavigationPanel
@@ -61,8 +62,11 @@ class MainLayout(Vertical):
         )
 
     async def on_mount(self) -> None:
-        """挂上状态栏下方的临时识别文字行，再按当前宽度算一次两栏宽度。"""
-        await self.query_one(StatusBar).mount(VoiceTextPanel(id="voice-text"))
+        """挂上状态栏下方的临时识别文字行与双路临时转写区，再按当前宽度算一次两栏宽度。"""
+        await self.query_one(StatusBar).mount(
+            VoiceTextPanel(id="voice-text"),
+            DialogueTempPanel(id="dialogue-temp"),
+        )
         self.call_after_refresh(self._apply_current_width)
 
     def on_resize(self, event: Resize) -> None:

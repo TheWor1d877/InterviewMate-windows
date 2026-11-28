@@ -11,6 +11,7 @@ from dataclasses import fields
 from app.core.question_classifier import (
     AsyncQuestionClassifier,
     Classification,
+    PROJECT_SCOPES,
     QuestionClassifier,
 )
 from app.core.question_session import (
@@ -143,17 +144,18 @@ def test_classification_is_frozen() -> None:
 
 
 def test_classification_defaults_to_rules_source() -> None:
-    """新加的两个字段有默认值：reason 为空、source 是 rules。"""
+    """新加的字段有默认值：reason 为空、source 是 rules、project_scope 是 none。"""
     result = Classification(
         question_type="unknown", rag_required=False, matched_rules=("unknown_fallback",)
     )
 
     assert result.reason == ""
     assert result.source == "rules"
+    assert result.project_scope == "none"
 
 
 def test_classification_field_order_is_stable() -> None:
-    """原三字段顺序不变，reason 与 source 排在后面。"""
+    """原三字段顺序不变，reason、source 与 project_scope 排在后面。"""
     names = tuple(item.name for item in fields(Classification))
 
     assert names == (
@@ -162,6 +164,7 @@ def test_classification_field_order_is_stable() -> None:
         "matched_rules",
         "reason",
         "source",
+        "project_scope",
     )
 
 
@@ -183,7 +186,10 @@ def test_retrieval_policy_disabled_never_retrieves() -> None:
     policy = RetrievalPolicy(enabled=False)
     decision = policy.decide(
         Classification(
-            question_type="project", rag_required=True, matched_rules=("project_keyword",)
+            question_type="project",
+            rag_required=True,
+            matched_rules=("project_keyword",),
+            project_scope="full",
         )
     )
     assert decision.should_retrieve is False
@@ -191,31 +197,54 @@ def test_retrieval_policy_disabled_never_retrieves() -> None:
 
 
 def test_retrieval_policy_force_project_mode_always_retrieves() -> None:
-    """强制项目模式下恒检索。"""
+    """强制项目模式下恒检索，是分类错类时的兜底。"""
     policy = RetrievalPolicy(enabled=True, force_project_mode=True)
     decision = policy.decide(
         Classification(
-            question_type="unknown", rag_required=False, matched_rules=("unknown_fallback",)
+            question_type="unknown",
+            rag_required=False,
+            matched_rules=("unknown_fallback",),
+            project_scope="none",
         )
     )
     assert decision.should_retrieve is True
+    assert decision.reason == "强制项目模式"
 
 
-def test_retrieval_policy_follows_rag_required() -> None:
-    """其余情况按 rag_required 决定。"""
+def test_retrieval_policy_follows_project_scope() -> None:
+    """其余情况按 project_scope 映射：mixed 与 full 检索，none 不检索。"""
     policy = RetrievalPolicy(enabled=True)
-    need = policy.decide(
+    full = policy.decide(
         Classification(
-            question_type="project", rag_required=True, matched_rules=("project_keyword",)
+            question_type="project",
+            rag_required=True,
+            matched_rules=("project_keyword",),
+            project_scope="full",
         )
     )
-    no_need = policy.decide(
+    mixed = policy.decide(
         Classification(
-            question_type="coding", rag_required=False, matched_rules=("coding_block",)
+            question_type="conceptual",
+            rag_required=True,
+            matched_rules=("llm",),
+            source="llm",
+            project_scope="mixed",
         )
     )
-    assert need.should_retrieve is True
-    assert no_need.should_retrieve is False
+    none_scope = policy.decide(
+        Classification(
+            question_type="coding",
+            rag_required=False,
+            matched_rules=("coding_block",),
+            project_scope="none",
+        )
+    )
+    assert full.should_retrieve is True
+    assert mixed.should_retrieve is True
+    assert none_scope.should_retrieve is False
+    assert full.reason == "题目是项目题，检索项目知识为主"
+    assert mixed.reason == "题目是简答题带项目，检索项目知识作补充"
+    assert none_scope.reason == "题目是纯简答题，无需检索项目知识"
 
 
 def test_normalize_text_removes_punctuation_and_space() -> None:
@@ -225,3 +254,69 @@ def test_normalize_text_removes_punctuation_and_space() -> None:
     assert normalize_text("  A B\tC\n") == "abc"
     assert normalize_text("排序 O(n log n)") == "排序onlogn"
     assert normalize_text("，。！？") == ""
+
+# ----------------------------------------------------------------
+# 项目范围三分类：本地规则回退只有 none/full 两档
+# ----------------------------------------------------------------
+
+
+def test_project_keyword_sets_project_scope_full() -> None:
+    """命中项目类关键词时 project_scope 是 full。"""
+    result = QuestionClassifier().classify("讲讲我的项目是怎么做的")
+
+    assert result.project_scope == "full"
+    assert result.rag_required is True
+
+
+def test_no_project_keyword_sets_project_scope_none() -> None:
+    """没命中项目类关键词时 project_scope 是 none。"""
+    classifier = QuestionClassifier()
+    for text in (CODE_BLOCK_TEXT, ERROR_TEXT, ALGORITHM_TEXT, SYSTEM_DESIGN_TEXT):
+        result = classifier.classify(text)
+        assert result.project_scope == "none", text
+        assert result.rag_required is False, text
+
+
+def test_code_with_project_keyword_sets_project_scope_full() -> None:
+    """代码题同时命中项目类关键词时，题型按规则 1，范围是 full。"""
+    result = QuestionClassifier().classify("我写的代码在这里：\n```python\nx = 1\n```")
+
+    assert result.question_type == "coding"
+    assert result.project_scope == "full"
+
+
+def test_unknown_text_sets_project_scope_none() -> None:
+    """都命中不了的题面 project_scope 是 none。"""
+    result = QuestionClassifier().classify(UNKNOWN_TEXT)
+
+    assert result.question_type == "unknown"
+    assert result.project_scope == "none"
+
+
+def test_force_project_mode_does_not_change_project_scope() -> None:
+    """强制项目模式只抬 rag_required，不改 project_scope 表达的题目性质。"""
+    classifier = QuestionClassifier(force_project_mode=True)
+    result = classifier.classify(UNKNOWN_TEXT)
+
+    assert result.rag_required is True
+    assert result.project_scope == "none"
+
+
+def test_project_scopes_has_three_legal_values() -> None:
+    """项目范围维度是约定的三档取值。"""
+    assert PROJECT_SCOPES == frozenset({"none", "mixed", "full"})
+
+def test_force_project_mode_property_reports_flag() -> None:
+    """force_project_mode 属性如实返回构造时的开关。"""
+    assert QuestionClassifier().force_project_mode is False
+    assert QuestionClassifier(force_project_mode=True).force_project_mode is True
+
+
+def test_retrieval_policy_properties_report_flags() -> None:
+    """enabled 与 force_project_mode 属性如实返回构造时的开关。"""
+    default = RetrievalPolicy()
+    assert default.enabled is True
+    assert default.force_project_mode is False
+    strict = RetrievalPolicy(enabled=False, force_project_mode=True)
+    assert strict.enabled is False
+    assert strict.force_project_mode is True

@@ -47,6 +47,19 @@ __all__ = ["SocketServer"]
 # 协议层错误统一用的错误码，见《2-骨架与配置》错误码一节
 _SOCKET_ERROR_CODE = "E_SOCKET"
 
+# 只负责触发的快捷键动作：先回执，动作放后台跑，命令行侧不等整条链路。
+# project-mode-toggle 可能触发模型懒加载，整条链路慢，也放后台；
+# context-view-toggle 与 context-clear 是快操作，保持同步处理，响应原样返回。
+_FIRE_AND_FORGET_ACTIONS = frozenset(
+    {
+        "voice-toggle",
+        "voice-start",
+        "voice-stop",
+        "screenshot",
+        "project-mode-toggle",
+    }
+)
+
 # 日志里允许出现的字符：字母、数字、下划线、点、冒号、连字符
 _LOG_SAFE_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
@@ -101,6 +114,7 @@ class SocketServer:
         self._socket_path = Path(socket_path)
         self._handlers: dict[str, Handler] = dict(handlers or {})
         self._transport = get_platform().transport(self._socket_path)
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def socket_path(self) -> Path:
@@ -143,6 +157,8 @@ class SocketServer:
 
         重复调用安全。
         """
+        for task in list(self._background_tasks):
+            task.cancel()
         # 传输层负责关监听与删端点文件
         await self._transport.stop()
         log_event("socket.stop", "停止监听 socket", path=str(self._socket_path))
@@ -211,6 +227,21 @@ class SocketServer:
                 payload={"code": _SOCKET_ERROR_CODE},
             )
             return
+        if request.action in _FIRE_AND_FORGET_ACTIONS:
+            log_event(
+                "socket.request",
+                "处理请求",
+                action=request.action,
+                request_id=_sanitize_request_id(request.request_id),
+            )
+            await self._write_response(
+                writer,
+                ok=True,
+                error="",
+                payload={"accepted": True, "action": request.action},
+            )
+            self._run_in_background(request, handler)
+            return
         try:
             result = handler(request)
             if inspect.isawaitable(result):
@@ -241,6 +272,32 @@ class SocketServer:
             request_id=_sanitize_request_id(request.request_id),
         )
         await self._write_response(writer, ok=True, error="", payload=self._as_payload(result))
+
+    def _run_in_background(self, request: Request, handler: Handler) -> None:
+        """把快捷键动作放后台执行，异常只记日志。"""
+
+        async def _run() -> None:
+            try:
+                result = handler(request)
+                if inspect.isawaitable(result):
+                    await result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_event(
+                    "socket.background.failed",
+                    "快捷键动作执行失败",
+                    level="WARNING",
+                    action=request.action,
+                    request_id=_sanitize_request_id(request.request_id),
+                    code=self._error_code(exc),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
+        task = asyncio.create_task(_run())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     @staticmethod
     def _error_code(exc: Exception) -> str:

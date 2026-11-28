@@ -83,6 +83,10 @@ class QuestionSession:
     # 本次没取到项目检索结果：检索失败、检索结果为空或没有可用的检索上下文。
     # 回答里不能声称已经检索到项目资料，见《6-Dify检索与项目知识》故障降级一节。
     retrieval_missing: bool = False
+    # 项目模式提交时注入的对话日志上下文（``DialogueLog.recent_text()`` 的
+    # 全文，含角色标注）。普通模式是空串，组装请求时不注入，
+    # 见《5-语音输入与流式ASR》项目模式一节。
+    dialogue_context: str = ""
 
 
 def normalize_text(text: str) -> str:

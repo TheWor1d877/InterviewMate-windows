@@ -33,10 +33,20 @@ __all__ = [
 ]
 
 
-# 合法 action 取值，与《2-骨架与配置》进程通信一节的 action 表逐字一致
+# 合法 action 取值，与《2-骨架与配置》进程通信一节的 action 表逐字一致。
+# voice-start 与 voice-stop 是按住语义的一对动作：按下开始采集，
+# 松开停止采集并冲刷最终文本提交；voice-toggle 保留向后兼容，
+# CLI 手动调用仍可用，界面内不再有 F8 点击切换。
+# project-mode-toggle 切换项目模式，可能触发模型懒加载；
+# context-view-toggle 切换上下文视图显示/切回；context-clear 清空上下文、重开一轮。
 ACTIONS: tuple[str, ...] = (
     "voice-toggle",
+    "voice-start",
+    "voice-stop",
     "screenshot",
+    "project-mode-toggle",
+    "context-view-toggle",
+    "context-clear",
     "stop",
     "status",
     "warmup",

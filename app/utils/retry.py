@@ -6,8 +6,8 @@
 
 规则：
 
-- 超时类异常（``E_DIFY_TIMEOUT``、``E_DEEPSEEK_TIMEOUT``）可重试；
-  鉴权类异常（``E_DIFY_AUTH``、``E_DEEPSEEK_AUTH``）不重试，Key 不对重试也没用，直接抛出；
+- 超时类异常（``E_DIFY_TIMEOUT``、``E_MODEL_TIMEOUT``）可重试；
+  鉴权类异常（``E_DIFY_AUTH``、``E_MODEL_AUTH``）不重试，Key 不对重试也没用，直接抛出；
   其它异常默认也不重试，保守处理，宁可少重试也不掩盖真实缺陷。
 - ``asyncio.CancelledError`` 原样抛出，绝不重试：用户取消的请求不允许自动恢复。
 - 重试用指数退避，初始延迟、倍数、抖动与单次上限都可配；
@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, TypeVar
 
 from app.core.exceptions import (
-    DeepSeekAuthError,
-    DeepSeekTimeoutError,
+    ModelAuthError,
+    ModelTimeoutError,
     DifyAuthError,
     DifyTimeoutError,
 )
@@ -43,13 +43,13 @@ __all__ = [
 # 默认可重试的异常类型：超时类，错误码见《2-骨架与配置》错误码一节
 RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     DifyTimeoutError,
-    DeepSeekTimeoutError,
+    ModelTimeoutError,
 )
 
 # 默认不可重试的异常类型：鉴权类，重试不会让 Key 变对
 NON_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     DifyAuthError,
-    DeepSeekAuthError,
+    ModelAuthError,
 )
 
 T = TypeVar("T")
@@ -77,7 +77,7 @@ class RetryPolicy:
     单次不超过 ``max_delay``。
 
     :param max_retries: 最多重试几次，0 表示不重试；与《2-骨架与配置》配置结构里的
-        ``deepseek.max_retries`` 同一个口径。
+        ``model.max_retries`` 同一个口径。
     :param initial_delay: 第一次重试前的等待秒数。
     :param multiplier: 指数退避的倍数，不能小于 1。
     :param max_delay: 单次等待的上限秒数。

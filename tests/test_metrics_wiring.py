@@ -20,7 +20,7 @@ import json
 import pytest
 
 from app.config import load_config
-from app.core.exceptions import DeepSeekStreamError, DifyTimeoutError
+from app.core.exceptions import ModelStreamError, DifyTimeoutError
 from app.core.question_manager import QuestionManager
 from app.llm.stream_parser import StreamParser
 from app.retrieval.dify_retriever import (
@@ -316,7 +316,7 @@ async def test_cancelled_request_has_no_total_latency() -> None:
 
 async def test_stream_error_still_records_total_latency() -> None:
     """流异常中断时照样记一条完整输出耗时。"""
-    client = FakeClient(NORMAL_CHUNKS, error=DeepSeekStreamError("流断了"))
+    client = FakeClient(NORMAL_CHUNKS, error=ModelStreamError("流断了"))
     manager = make_manager(client)
 
     await manager.submit_text(QUESTION)
@@ -328,14 +328,14 @@ async def test_stream_error_still_records_total_latency() -> None:
 
 async def test_source_follows_client_name() -> None:
     """客户端带 name 时用它当来源标记。"""
-    client = FakeClient(NORMAL_CHUNKS, name="deepseek")
+    client = FakeClient(NORMAL_CHUNKS, name="openai")
     manager = make_manager(client)
 
     await manager.submit_text(QUESTION)
 
     samples = default_recorder().samples("ttft")
     assert len(samples) == 1
-    assert samples[0].source == "deepseek"
+    assert samples[0].source == "openai"
 
 
 async def test_source_falls_back_to_config() -> None:

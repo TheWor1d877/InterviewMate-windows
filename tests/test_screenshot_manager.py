@@ -457,7 +457,7 @@ async def test_publish_hint_keeps_other_status_fields() -> None:
             audio="on",
             asr="ready",
             dify="ready",
-            deepseek="streaming",
+            model="streaming",
             ttft_ms=120.0,
             hint="生成中",
         )
@@ -473,4 +473,4 @@ async def test_publish_hint_keeps_other_status_fields() -> None:
         assert snapshot["audio"] == "on"
         assert snapshot["asr"] == "ready"
         assert snapshot["dify"] == "ready"
-        assert snapshot["deepseek"] == "streaming"
+        assert snapshot["model"] == "streaming"

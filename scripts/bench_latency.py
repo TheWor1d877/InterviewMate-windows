@@ -16,7 +16,7 @@
 
     ./.venv/Scripts/python.exe scripts/bench_latency.py --config config/real.yaml
 
-配置里把 ``providers.llm`` 改成 ``deepseek``、``providers.retrieval`` 改成
+配置里把 ``providers.llm`` 改成 ``openai``、``providers.retrieval`` 改成
 ``dify``，就会真的发请求；默认配置四个 provider 全是 ``mock``，不发网络请求。
 
 组装一律走仓库自己的装配函数：模型客户端用 :func:`app.main.select_client`，
@@ -163,7 +163,7 @@ class _HeadlessApp:
     def show_error(self, code: str, detail: str) -> None:
         """把错误记下来。
 
-        :param code: 错误码，例如 ``E_DEEPSEEK_TIMEOUT``。
+        :param code: 错误码，例如 ``E_MODEL_TIMEOUT``。
         :param detail: 一句话说明。
         """
         self.errors.append((code, detail))
